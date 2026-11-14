@@ -1,0 +1,12 @@
+node_modules/
+dist/
+data/
+*.log
+.DS_Store
+.venv/
+__pycache__/
+# 研究リポジトリの比較用clone・モデル重みはコミットしない
+external/
+*.pt
+*.pth
+*.ckpt

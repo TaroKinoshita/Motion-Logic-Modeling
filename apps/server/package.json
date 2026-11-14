@@ -1,0 +1,13 @@
+{
+  "name": "@mlm/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@hono/node-server": "^2.1.8",
+    "@mlm/core": "*",
+    "@napi-rs/canvas": "^1.1.1",
+    "hono": "^4.13.18",
+    "zod": "^4.6.7"
+  }
+}

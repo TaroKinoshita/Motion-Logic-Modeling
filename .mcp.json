@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "motion-logic": {
+      "command": "node",
+      "args": ["apps/mcp/src/index.ts"]
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "motion-logic",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Motion Logic Modeling (MLM) - 動きと演出構成の分析・再構成アプリ",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "server": "node apps/server/src/index.ts",
+    "stop": "node -e \"fetch('http://127.0.0.1:'+(process.env.MLM_PORT||4517)+'/api/shutdown',{method:'POST'}).then(()=>console.log('stopped'),()=>console.log('not running'))\"",
+    "web": "npm run dev -w @mlm/web",
+    "build": "npm run build -w @mlm/web",
+    "mcp": "node apps/mcp/src/index.ts",
+    "test": "node --test \"packages/core/test/*.test.ts\"",
+    "typecheck": "tsc -p packages/core && tsc -p apps/server && tsc -p apps/mcp && tsc -p apps/web"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.2"
+  }
+}
