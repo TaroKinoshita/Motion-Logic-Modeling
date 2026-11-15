@@ -46,18 +46,26 @@ interface Handles {
   rotate: [number, number];
 }
 
-/** 選択枠の四隅（拡縮用）と、上辺の外側の点（回転用）をシーン座標で返す。 */
-function handlesOf(sel: EvaluatedElement, pxScale: number): Handles {
+/**
+ * 選択枠の四隅（拡縮用）と、上辺の外側の点（回転用）をシーン座標で返す。
+ * 回転用の点が画面の外に出る場合（画面の上端近くの要素など）は、つかめるように下辺の外側に出す。
+ */
+function handlesOf(sel: EvaluatedElement, pxScale: number, sceneW: number, sceneH: number): Handles {
   const [a, b, c, d, e, f] = sel.matrix;
   const at = (lx: number, ly: number): [number, number] => [a * lx + c * ly + e, b * lx + d * ly + f];
   const w = sel.width / 2;
   const h = sel.height / 2;
-  const top = at(0, -h);
-  const len = Math.hypot(top[0] - e, top[1] - f) || 1;
   const off = 28 * pxScale;
+  const outside = (edgeY: number): [number, number] => {
+    const p = at(0, edgeY);
+    const len = Math.hypot(p[0] - e, p[1] - f) || 1;
+    return [p[0] + ((p[0] - e) / len) * off, p[1] + ((p[1] - f) / len) * off];
+  };
+  const inView = ([x, y]: [number, number]) => x >= 0 && x <= sceneW && y >= 0 && y <= sceneH;
+  const top = outside(-h);
   return {
     corners: [at(-w, -h), at(w, -h), at(w, h), at(-w, h)],
-    rotate: [top[0] + ((top[0] - e) / len) * off, top[1] + ((top[1] - f) / len) * off],
+    rotate: inView(top) ? top : outside(h),
   };
 }
 
@@ -98,7 +106,7 @@ export function Stage({ scene, baseScene, time, mode, videoUrl, videoRef, select
 
     const sel = evaluateScene(scene, time).find((e) => e.element.id === selectedId);
     if (!sel) return;
-    const h = handlesOf(sel, px);
+    const h = handlesOf(sel, px, scene.width, scene.height);
     ctx.strokeStyle = '#33d0ff';
     ctx.lineWidth = 2 * px;
     ctx.setLineDash([6 * px, 5 * px]);
@@ -134,7 +142,7 @@ export function Stage({ scene, baseScene, time, mode, videoUrl, videoRef, select
     // 先に、選択中の要素のハンドル（回転・拡縮）を調べる。
     const sel = selectedId ? evaluateScene(scene, time).find((x) => x.element.id === selectedId) : undefined;
     if (sel) {
-      const h = handlesOf(sel, px);
+      const h = handlesOf(sel, px, scene.width, scene.height);
       if (near(h.rotate)) return start('rotate', sel.element.id, sel.cx, sel.cy);
       if (h.corners.some(near)) return start('scale', sel.element.id, sel.cx, sel.cy);
     }

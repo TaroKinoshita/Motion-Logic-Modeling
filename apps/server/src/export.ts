@@ -62,44 +62,68 @@ export async function exportVideo(project: ProjectMeta, scene: Scene, opts: Expo
   const fileName = `${compare ? 'compare' : 'simplified'}_r${project.revision}_${Math.round(from * 1000)}-${Math.round(to * 1000)}.mp4`;
   const out = path.join(dir, fileName);
 
-  const args = ['-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${width}x${height}`, '-r', frameRate, '-i', 'pipe:0'];
-  if (hasAudio || compare) args.push('-ss', from.toFixed(4), '-t', (to - from).toFixed(4), '-i', sourcePath(project));
-  if (compare) {
-    args.push(
-      '-filter_complex',
-      `[1:v]fps=${frameRate},scale=${width}:${height},setsar=1[s];[0:v]setsar=1[r];[s][r]hstack=inputs=2[v]`,
-      '-map', '[v]',
-    );
-  } else {
-    args.push('-map', '0:v');
-  }
-  if (hasAudio) args.push('-map', '1:a', '-c:a', 'aac');
+  const src = sourcePath(project);
+  const f = from.toFixed(6);
+  const t = to.toFixed(6);
+  // 元動画の区間は入力の -ss/-t ではなくフィルターの trim/atrim で切る（入力側で切ると端数で短くなった）。
+  const audioFilter = (input: number) => `[${input}:a]atrim=start=${f}:end=${t},asetpts=PTS-STARTPTS[a]`;
   // 長さは映像のフレーム数で決める（-shortest だと音声の端数に合わせて映像が数フレーム削られる）。
-  args.push('-frames:v', String(frameCount), '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18', out);
+  const encode = ['-frames:v', String(frameCount), '-c:v', 'libx264', '-pix_fmt', 'yuv420p'];
 
-  const ff = spawn(FFMPEG, args, { stdio: ['pipe', 'ignore', 'pipe'], windowsHide: true });
-  let stderr = '';
-  ff.stderr.on('data', (d) => (stderr += d));
-  const done = new Promise<number>((resolve, reject) => {
-    ff.on('error', reject);
-    ff.on('close', (code) => resolve(code ?? 1));
-  });
-  ff.stdin.on('error', () => {}); // FFmpegが先に落ちた場合は終了コードで報告する
+  // 出力はいつも一時ファイル名に書き、最後に正式な名前へ置き換える。OneDrive 配下で同名ファイルを
+  // FFmpeg の -y で上書きすると、ときどき数フレーム短いファイルになった（別名なら10回とも正確。実測）。
+  const tmp = (tag: string) => path.join(dir, `.tmp_${process.pid}_${Date.now()}_${tag}.mp4`);
+  const finalTmp = tmp('out');
+  // 1段目：簡略版をパイプでFFmpegへ流してMP4にする。比較動画ではこれを2段目で元動画と並べる。
+  const renderOut = compare ? tmp('render') : finalTmp;
+  const temps = [renderOut, finalTmp];
+  const args = ['-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${width}x${height}`, '-r', frameRate, '-i', 'pipe:0'];
+  if (hasAudio && !compare) args.push('-i', src, '-filter_complex', audioFilter(1), '-map', '0:v', '-map', '[a]', '-c:a', 'aac');
+  else args.push('-map', '0:v');
+  args.push(...encode, '-crf', compare ? '10' : '18', renderOut);
 
-  const canvas = createCanvas(width, height);
-  const ctx = canvas.getContext('2d');
-  const scale = width / scene.width;
-  for (let i = 0; i < frameCount; i++) {
-    ctx.setTransform(scale, 0, 0, height / scene.height, 0, 0);
-    drawFrame(ctx as unknown as CanvasRenderingContext2D, scene, from + i / fps);
-    if (!ff.stdin.write(canvas.data())) await Promise.race([once(ff.stdin, 'drain'), done]);
-    if (ff.exitCode !== null) break;
+  try {
+    await runFfmpeg(args, async (stdin, done) => {
+      const canvas = createCanvas(width, height);
+      const ctx = canvas.getContext('2d');
+      const scale = width / scene.width;
+      for (let i = 0; i < frameCount; i++) {
+        ctx.setTransform(scale, 0, 0, height / scene.height, 0, 0);
+        drawFrame(ctx as unknown as CanvasRenderingContext2D, scene, from + i / fps);
+        // FFmpegが先に終わると stdin に 'error' が出て once が reject する。終了コードで報告するので握りつぶす。
+        if (!stdin.write(canvas.data())) await Promise.race([once(stdin, 'drain').catch(() => {}), done]);
+        if (stdin.destroyed) break;
+      }
+    });
+
+    if (compare) {
+      // 2段目：元動画の区間を、簡略版と同じフレーム数・サイズのファイルとして単独で切り出す。
+      // 区間の端数で足りない分は最後のコマを延ばす。（元動画と簡略版を1つのフィルターグラフで tpad＋hstack すると、
+      // 入力の終わりの処理順で長さが実行ごとに最大十数フレーム変わった。FFmpeg単体でも再現。実測）
+      const sourceClip = tmp('source');
+      temps.push(sourceClip);
+      await runFfmpeg([
+        '-v', 'error', '-y', '-i', src,
+        '-vf', `trim=start=${f}:end=${t},setpts=PTS-STARTPTS,fps=${frameRate},scale=${width}:${height},setsar=1,tpad=stop_mode=clone:stop_duration=2`,
+        '-an', ...encode, '-crf', '10', sourceClip,
+      ]);
+      // 3段目：同じフレーム数のファイル同士を左右に並べる。
+      const stacked = hasAudio ? tmp('stacked') : finalTmp;
+      temps.push(stacked);
+      await runFfmpeg([
+        '-v', 'error', '-y', '-i', sourceClip, '-i', renderOut,
+        '-filter_complex', '[0:v]setsar=1[s];[1:v]setsar=1[r];[s][r]hstack=inputs=2[v]',
+        '-map', '[v]', ...encode, '-crf', '18', stacked,
+      ]);
+      // 4段目：映像はコピーのまま音声を足す（フレームは増減しない）。音声と同時に処理すると長さが変わることがあった。
+      if (hasAudio) {
+        await runFfmpeg(['-v', 'error', '-y', '-i', stacked, '-i', src, '-filter_complex', audioFilter(1), '-map', '0:v', '-map', '[a]', '-c:v', 'copy', '-c:a', 'aac', finalTmp]);
+      }
+    }
+    await replaceFile(finalTmp, out);
+  } finally {
+    for (const p of temps) fs.rmSync(p, { force: true });
   }
-  ff.stdin.end();
-  const code = await done.catch((err: NodeJS.ErrnoException) => {
-    throw new HttpError(500, err.code === 'ENOENT' ? 'ffmpeg が見つかりません' : `ffmpeg の起動に失敗: ${err.message}`);
-  });
-  if (code !== 0) throw new HttpError(500, 'ffmpeg での書き出しに失敗しました', stderr.slice(-2000));
 
   return {
     fileName,
@@ -115,6 +139,43 @@ export async function exportVideo(project: ProjectMeta, scene: Scene, opts: Expo
     sizeBytes: fs.statSync(out).size,
     elapsedMs: Date.now() - started,
   };
+}
+
+/** from を to へ置き換える。同期ソフト等が一時的につかんでいると失敗するので、少し待って数回やり直す。 */
+async function replaceFile(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.rmSync(to, { force: true });
+      fs.renameSync(from, to);
+      return;
+    } catch (err) {
+      if (attempt >= 9) throw new HttpError(500, `書き出したファイルを ${path.basename(to)} に置き換えられませんでした（別のアプリが開いている可能性）`, String(err));
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+}
+
+/** FFmpegを起動して終了を待つ。feed を渡すと stdin へ書き込み、終わったら閉じる。失敗は HttpError にする。 */
+async function runFfmpeg(
+  args: string[],
+  feed?: (stdin: NodeJS.WritableStream & { destroyed: boolean }, done: Promise<number>) => Promise<void>,
+): Promise<void> {
+  const ff = spawn(FFMPEG, args, { stdio: [feed ? 'pipe' : 'ignore', 'ignore', 'pipe'], windowsHide: true });
+  let stderr = '';
+  ff.stderr?.on('data', (d) => (stderr += d));
+  const done = new Promise<number>((resolve, reject) => {
+    ff.on('error', reject);
+    ff.on('close', (code) => resolve(code ?? 1));
+  });
+  if (feed && ff.stdin) {
+    ff.stdin.on('error', () => {}); // FFmpegが先に落ちた場合は終了コードで報告する
+    await feed(ff.stdin, done);
+    ff.stdin.end();
+  }
+  const code = await done.catch((err: NodeJS.ErrnoException) => {
+    throw new HttpError(500, err.code === 'ENOENT' ? 'ffmpeg が見つかりません' : `ffmpeg の起動に失敗: ${err.message}`);
+  });
+  if (code !== 0) throw new HttpError(500, 'ffmpeg での書き出しに失敗しました', stderr.slice(-2000));
 }
 
 

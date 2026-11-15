@@ -263,7 +263,8 @@ app.get('/api/events', (c) =>
     stream.onAbort(() => void events.off('change', onChange));
     await stream.writeSSE({ event: 'hello', data: '{}' });
     while (!stream.aborted) {
-      await stream.sleep(20000);
+      // UIはこのpingが一定時間届かなければ接続を張り直す（サーバー再起動時に開発用プロキシが接続を閉じないため）。
+      await stream.sleep(10000);
       await stream.writeSSE({ event: 'ping', data: '{}' });
     }
   }),

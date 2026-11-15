@@ -92,21 +92,59 @@ export function App() {
   }, [audioKey, projectId]);
 
   // サーバーからの変更通知（AIや別タブの変更）を受けて読み直す。
+  // サーバーが再起動すると、開発用プロキシは接続を開いたまま何も流さなくなるか、エラー応答で EventSource を
+  // 閉じてしまい、その後のAIの変更が画面に出なくなった（実測）。サーバーは10秒ごとに ping を送るので、
+  // 25秒なにも届かないか接続が閉じたら作り直す。2回目以降の接続では読み直して取りこぼしを埋める。
   useEffect(() => {
-    const es = new EventSource('/api/events');
-    es.addEventListener('change', (ev) => {
-      const e = JSON.parse((ev as MessageEvent).data) as { projectId: string; actor: string; revision: number };
-      reloadList();
-      if (e.projectId !== projectId) return;
-      if (e.revision < 0) {
-        setProjectId('');
-        setMessage('このプロジェクトはごみ箱へ移されました');
-        return;
-      }
-      reload(projectId);
-      if (e.actor !== 'human') setMessage(`${e.actor} がリビジョン ${e.revision} に更新しました`);
-    });
-    return () => es.close();
+    let es: EventSource | null = null;
+    let retry = 0;
+    let watchdog = 0;
+    let closed = false;
+    let first = true;
+    const reconnect = () => {
+      if (closed) return;
+      es?.close();
+      window.clearTimeout(retry);
+      retry = window.setTimeout(connect, 2000);
+    };
+    const alive = () => {
+      window.clearTimeout(watchdog);
+      watchdog = window.setTimeout(reconnect, 25000);
+    };
+    const connect = () => {
+      es = new EventSource('/api/events');
+      alive();
+      es.addEventListener('ping', alive);
+      es.addEventListener('hello', () => {
+        alive();
+        if (first) return void (first = false);
+        reloadList();
+        if (projectId) reload(projectId);
+      });
+      es.addEventListener('change', (ev) => {
+        alive();
+        const e = JSON.parse((ev as MessageEvent).data) as { projectId: string; actor: string; revision: number };
+        reloadList();
+        if (e.projectId !== projectId) return;
+        if (e.revision < 0) {
+          setProjectId('');
+          setMessage('このプロジェクトはごみ箱へ移されました');
+          return;
+        }
+        reload(projectId);
+        if (e.actor !== 'human') setMessage(`${e.actor} がリビジョン ${e.revision} に更新しました`);
+      });
+      es.onerror = () => {
+        if (es?.readyState === EventSource.CLOSED) reconnect();
+      };
+    };
+    connect();
+    return () => {
+      closed = true;
+      window.clearTimeout(retry);
+      window.clearTimeout(watchdog);
+      es?.close();
+    };
   }, [projectId, reload, reloadList]);
 
   useEffect(() => {
