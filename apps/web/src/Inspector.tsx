@@ -25,6 +25,7 @@ export function Inspector({ data, history, selectedId, onApply, onAddRect, onSel
   const [draftError, setDraftError] = useState('');
   const [path, setPath] = useState('');
   const [busy, setBusy] = useState(false);
+  const [busyLabel, setBusyLabel] = useState('');
   const [threshold, setThreshold] = useState(10);
 
   useEffect(() => {
@@ -50,7 +51,8 @@ export function Inspector({ data, history, selectedId, onApply, onAddRect, onSel
     }
   };
 
-  const importMedia = async (run: () => Promise<ProjectData>) => {
+  const importMedia = async (run: () => Promise<ProjectData>, label = '取り込み中…') => {
+    setBusyLabel(label);
     setBusy(true);
     try {
       onImported(await run());
@@ -96,9 +98,14 @@ export function Inspector({ data, history, selectedId, onApply, onAddRect, onSel
             if (file) void importMedia(() => api.upload(project.id, file));
           }}
         />
-        {busy && <p className="dim">取り込み中…</p>}
+        {busy && <p className="dim">{busyLabel}</p>}
         {project.source && (
           <div className="line">
+            <button disabled={busy} onClick={() => importMedia(async () => {
+              const response = await fetch(`/api/projects/${project.id}/detect-beats`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ baseRevision: project.revision, actor: 'human' }) });
+              const result = await response.json(); if (!response.ok) throw new Error(result.error);
+              return api.getProject(project.id);
+            }, '拍を解析中…')}>拍を推定</button>
             <button onClick={() => onDetectCuts(threshold)} title="画面全体の変化量からカット候補を推定してマーカーを置く。フラッシュや強い動きも拾う">
               カット候補を検出
             </button>

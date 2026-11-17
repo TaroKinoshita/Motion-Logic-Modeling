@@ -1,3 +1,8 @@
+import { compareSegment } from './compare.ts';
+import { TrackingRequest, trackRegion } from './tracking.ts';
+import { MusicRequest, importMusic } from './music.ts';
+import { MeasureRequest, ModelRequest, VariantRequest, AdaptRequest, BaselineRequest, measureEvents, saveModel, generateVariant, generateAdaptation, generateBaselines } from './modeling.ts';
+import { detectBeats } from './beats.ts';
 // Motion Logic サーバー。UI（ブラウザ）とMCPアダプターの両方がこのHTTP APIを使う。
 // ローカル利用が前提なので 127.0.0.1 にだけ待ち受ける。
 import fs from 'node:fs';
@@ -21,6 +26,7 @@ import {
   DATA_DIR,
   events,
   getProject,
+  getDocuments,
   HttpError,
   listHistory,
   listProjects,
@@ -70,6 +76,14 @@ app.post('/api/projects', async (c) => {
 });
 
 app.get('/api/projects/:id', (c) => c.json(getProject(c.req.param('id'))));
+app.get('/api/projects/:id/documents', c => c.json(getDocuments(c.req.param('id'))));
+app.post('/api/projects/:id/track-region', async c => c.json(await trackRegion(c.req.param('id'), parse(TrackingRequest, await c.req.json()))));
+app.post('/api/projects/:id/music', async c => c.json(await importMusic(c.req.param('id'), parse(MusicRequest, await c.req.json()))));
+app.post('/api/projects/:id/measure-events', async c => c.json(measureEvents(c.req.param('id'), parse(MeasureRequest, await c.req.json()))));
+app.post('/api/projects/:id/model', async c => c.json(saveModel(c.req.param('id'), parse(ModelRequest, await c.req.json()))));
+app.post('/api/projects/:id/variant', async c => c.json(generateVariant(c.req.param('id'), parse(VariantRequest, await c.req.json()))));
+app.post('/api/projects/:id/adapt', async c => c.json(generateAdaptation(c.req.param('id'), parse(AdaptRequest, await c.req.json()))));
+app.post('/api/projects/:id/adapt-baselines', async c => c.json(generateBaselines(c.req.param('id'), parse(BaselineRequest, await c.req.json()))));
 
 // シーンの部分更新（ops）または全体置換（scene）。baseRevision 必須。
 app.post('/api/projects/:id/scene', async (c) => {
@@ -114,6 +128,7 @@ async function registerMedia(id: string, file: string, fileName: string, actor: 
     note: `元動画を取り込み: ${fileName}`,
     meta: (p) => {
       p.source = source;
+      delete p.audioAnalysis;
     },
     scene: (s) => ({ ...s, width: source.width, height: source.height, fps: source.fps, duration: source.duration || s.duration }),
   });
@@ -177,6 +192,16 @@ app.post('/api/projects/:id/detect-cuts', async (c) => {
 });
 
 // 簡略シーンをMP4に書き出す（同期処理。短い区間向け）。
+app.post('/api/projects/:id/compare', async c => {
+  const body = parse(z.object({ from: z.number().nonnegative(), to: z.number().positive(), width: z.number().int().min(160).max(1920).default(1280) }), await c.req.json());
+  return c.json(await compareSegment(c.req.param('id'), body.from, body.to, body.width));
+});
+
+app.post('/api/projects/:id/detect-beats', async c => {
+  const body = parse(z.object({ baseRevision: z.number().int(), actor: Actor }), await c.req.json());
+  return c.json(await detectBeats(c.req.param('id'), body.baseRevision, body.actor));
+});
+
 app.post('/api/projects/:id/export', async (c) => {
   const { project, scene } = getProject(c.req.param('id'));
   const body = parse(
@@ -249,6 +274,8 @@ app.get('/api/projects/:id/frames', async (c) => {
       count: z.coerce.number().int().min(1).max(24).default(8),
       cellWidth: z.coerce.number().int().min(64).max(1280).optional(),
       columns: z.coerce.number().int().min(1).max(8).optional(),
+      region: z.string().optional(),
+      gridStep: z.coerce.number().int().min(8).max(2048).optional(),
     }),
     c.req.query(),
   );
@@ -257,7 +284,12 @@ app.get('/api/projects/:id/frames', async (c) => {
     : spreadTimes(q.from ?? 0, q.to ?? scene.duration, q.count);
   if (!times.length || times.length > 24) throw new HttpError(400, '時刻は1〜24個で指定してください');
   const cellWidth = q.cellWidth ?? (times.length === 1 ? 640 : 320);
-  const jpeg = await renderSheet(project, scene, { kind: q.kind as FrameKind, times, cellWidth, columns: q.columns });
+  let region;
+  if (q.region) {
+    try { region = parse(z.strictObject({ x: z.number().int().nonnegative(), y: z.number().int().nonnegative(), w: z.number().int().positive(), h: z.number().int().positive() }), JSON.parse(q.region)); }
+    catch { throw new HttpError(400, 'regionは{x,y,w,h}のJSONで指定してください'); }
+  }
+  const jpeg = await renderSheet(project, scene, { region, gridStep: q.gridStep, kind: q.kind as FrameKind, times, cellWidth, columns: q.columns });
   return new Response(new Uint8Array(jpeg), {
     headers: { 'content-type': 'image/jpeg', 'x-mlm-times': times.join(','), 'x-mlm-revision': String(project.revision) },
   });

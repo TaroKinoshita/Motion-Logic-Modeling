@@ -2,6 +2,7 @@
 // いまは同期処理（短い区間向け）。長尺・進捗・キャンセルはジョブ管理を入れる段階で対応する。
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createCanvas } from '@napi-rs/canvas';
@@ -14,6 +15,8 @@ const FFMPEG = process.env.MLM_FFMPEG ?? 'ffmpeg';
 export const MAX_EXPORT_SECONDS = 120;
 
 export interface ExportOptions {
+  /** Server-internal unique suffix for concurrent analysis exports. */
+  outputTag?: string;
   from: number;
   to: number;
   /** 出力の幅。高さは縦横比から決まる（偶数に丸める）。 */
@@ -59,7 +62,8 @@ export async function exportVideo(project: ProjectMeta, scene: Scene, opts: Expo
   fs.mkdirSync(dir, { recursive: true });
   const compare = opts.layout === 'compare';
   if (compare && !project.source) throw new HttpError(400, '比較動画には元動画の取り込みが必要です');
-  const fileName = `${compare ? 'compare' : 'simplified'}_r${project.revision}_${Math.round(from * 1000)}-${Math.round(to * 1000)}.mp4`;
+  if (opts.outputTag && !/^[a-zA-Z0-9-]+$/.test(opts.outputTag)) throw new HttpError(400, '不正な書き出し識別子です');
+  const fileName = `${compare ? 'compare' : 'simplified'}_r${project.revision}_${Math.round(from * 1000)}-${Math.round(to * 1000)}${opts.outputTag ? '_' + opts.outputTag : ''}.mp4`;
   const out = path.join(dir, fileName);
 
   const src = sourcePath(project);
@@ -72,7 +76,7 @@ export async function exportVideo(project: ProjectMeta, scene: Scene, opts: Expo
 
   // 出力はいつも一時ファイル名に書き、最後に正式な名前へ置き換える。OneDrive 配下で同名ファイルを
   // FFmpeg の -y で上書きすると、ときどき数フレーム短いファイルになった（別名なら10回とも正確。実測）。
-  const tmp = (tag: string) => path.join(dir, `.tmp_${process.pid}_${Date.now()}_${tag}.mp4`);
+  const tmp = (tag: string) => path.join(dir, `.tmp_${randomUUID()}_${tag}.mp4`);
   const finalTmp = tmp('out');
   // 1段目：簡略版をパイプでFFmpegへ流してMP4にする。比較動画ではこれを2段目で元動画と並べる。
   const renderOut = compare ? tmp('render') : finalTmp;

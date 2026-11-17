@@ -77,7 +77,7 @@ command = "node"
 args = ['C:\path\to\Motion Logic Modeling\apps\mcp\src\index.ts']
 ```
 
-ツール（12）：`get_guide` `list_projects` `create_project` `import_media` `get_project_state` `update_scene` `get_frames` `render_preview`（`layout: "compare"` で比較動画） `detect_cuts` `get_history` `revert_revision` `delete_project`（ごみ箱へ移す）。使い方とシーン形式は `get_guide` が返す。
+ツール（15）：`get_guide` `list_projects` `create_project` `import_media` `get_project_state` `update_scene` `get_frames` `render_preview`（`layout: "compare"` で比較動画） `detect_cuts` `detect_beats` `compare_segment` `model_project` `get_history` `revert_revision` `delete_project`（ごみ箱へ移す）。使い方とシーン形式は `get_guide` が返す。
 
 ChatGPTアプリは公開HTTPSのMCPが必要なため、現時点では対象外（計画仕様書 §3.4）。
 
@@ -118,4 +118,33 @@ BPMと文字の分割・秒の時間差は右パネルから変更できる。BP
 
 検証の再実行：`node scripts/verify-v2.mjs`。既存の合成サンプル `p_mwh3s99t2w85` を読み、`data/v2-validation/` に別プロジェクトとレポートを作る。既定ポート4518（`MLM_VERIFY_PORT`で変更可）。元プロジェクトは編集しない。
 
-[実装の根拠・検証数値・残り](docs/06_v2_Implementation_Results.md)。拍の自動推定、実素材での計測、新曲への構成はまだ未実装／未検証。
+[v2の根拠・検証数値](docs/06_v2_Implementation_Results.md)。拍推定は下記の通り実装済み。実素材での計測、新曲への構成は未検証／未実装。
+
+## 拍推定ワーカー（M2b）
+
+初回セットアップ：`uv sync --project workers/beats --python 3.11`。依存はuv.lockで固定し、専用.venvへ入れる。
+UIの「拍を推定」、MCPの`detect_beats`、HTTPの`POST /api/projects/:id/detect-beats`（baseRevision必須）から実行。
+実行時はoffline/frozenで追加ダウンロードしない。元動画に音声が必要。BPM推定はシーンtempoを自動変更しない。
+確認用：`node scripts/verify-beats.mjs`（先にverify-v2の検証データが必要）。結果と制約は文書07。
+
+`get_frames` の `region: {x,y,w,h}` は元動画pxの切り出し領域、`grid_step` は座標目盛りの間隔。compareでは左右とも同じ領域を拡大する。動画がない場合はシーン座標。HTTPはregionをJSON文字列、gridStepを数値で指定する。
+
+区間SSIM：MCP `compare_segment(project_id, from, to, width?)` または `POST /api/projects/:id/compare`（JSON: from/to/width）。最大120秒。元動画と簡略版を同じ寸法・フレームレートで比較する。検証は `node scripts/verify-beats-http.mjs`。
+
+領域追跡：`uv sync --project workers/track --python 3.11`。CLI検証は `node scripts/verify-track.mjs C:/Users/kinos/mlm_samples/kinetic_sample.mp4`。HTTP/MCPからも実行でき、観察と近似を分離保存して矩形のキーへ適用する。追跡の専用UIとcubic-bezier近似は未実装。[初期検証](docs/09_Tracking_Comparison_Results.md)、[アプリ接続とM3・M4](docs/10_M3_M4_Implementation.md)。
+
+## M3・M4の初版（API / MCP）
+
+MCPの `model_project(project_id, operation, input)` で次を実行できる。入力形式は `get_guide` に記載。HTTPは同名の `POST /api/projects/:id/<operation>`。更新にはbaseRevision、再構成にはtargetRevisionも必要。
+
+- `track-region`：領域追跡→観察保存→線形キー適用。
+- `measure-events` / `model`：イベントと拍の差を計測し、その観察に紐づく仮説・規則を保存。
+- `variant`：停止長・文字の時間差を変更した別プロジェクトを生成。
+- `music`：新規プロジェクトにローカル音声を取り込み（黒背景動画に変換、120秒以内）。続いて `detect_beats` で解析。
+- `adapt`：全要素の区間対応と理由を明示し、対象曲へ時間を割り当てた別プロジェクトを生成。
+- `adapt-baselines`：全体速度変更、拍の両端合わせ、固定テンプレートの3比較版を生成。
+- `documents`：観察・仮説・規則・近似・再構成の文書を取得。これは読取なのでinput不要。
+
+生成物は通常のプロジェクトとして既存UIで閲覧・編集・書き出しできる。専用フォームや楽曲構成の自動推定はまだない。実素材による演出評価も未完了。
+
+統合検証：`node scripts/verify-modeling.mjs C:/Users/kinos/mlm_samples/kinetic_sample.mp4`。隔離した `data/modeling-validation/` にテスト用プロジェクトとreport.jsonを保存する。[根拠・検証・制限](docs/10_M3_M4_Implementation.md)。

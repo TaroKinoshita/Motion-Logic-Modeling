@@ -98,7 +98,7 @@ try {
   const env = Object.fromEntries(Object.entries(process.env).filter(([, v]) => typeof v === 'string'));
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(root, 'apps/mcp/src/index.ts')], env: { ...env, MLM_SERVER_URL: base }, stderr: 'pipe' }));
   const id = projects[1].project.id;
-  const tools = await client.listTools(); assert.equal(tools.tools.length, 12);
+  const tools = await client.listTools(); assert.equal(tools.tools.length, 15);
   const update = await client.callTool({ name: 'update_scene', arguments: { project_id: id, base_revision: projects[1].project.revision, ops: [{ op: 'setSceneProps', props: { tempo: { bpm: 100, offset: 0 } } }] } });
   assert.ok(!update.isError);
   const image = await client.callTool({ name: 'get_frames', arguments: { project_id: id, kind: 'render', times: [0.5, 2.5, 7.35, 9], cell_width: 640 } });
@@ -109,7 +109,7 @@ try {
   const stale = await client.callTool({ name: 'update_scene', arguments: { project_id: id, base_revision: 1, ops: [{ op: 'setSceneProps', props: { duration: 8 } }] } });
   assert.equal(stale.isError, true);
   await api(`/api/projects/${id}/scene`, { baseRevision: current.project.revision, ops: [{ op: 'setSceneProps', props: { tempo: { bpm: 120, offset: 0 } } }] });
-  report.checks.push('12 MCP tools, beat tempo update, image return, stale revision rejected');
+  report.checks.push('15 MCP tools, beat tempo update, image return, stale revision rejected');
   const exports = [];
   for (const p of projects) exports.push(await api(`/api/projects/${p.project.id}/export`, { from: 0, to: 10, width: 1280, withAudio: false }));
   for (const e of exports) {

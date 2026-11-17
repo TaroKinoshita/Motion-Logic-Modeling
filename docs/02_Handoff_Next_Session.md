@@ -1,5 +1,7 @@
 # Motion Logic — Handoff for the Next Session
 
+> **2026-11-18 再開地点**：以下の古い状態説明より [10_M3_M4_Implementation.md](10_M3_M4_Implementation.md) を優先して進捗を確認する。M2追跡のAPI/MCP・履歴・キー適用、M3計測/仮説/規則/比較版、M4音声取り込み/明示区間再構成/3比較基準を実装し、合成素材の統合試験に成功。core 23件・型・ビルド・既存拍/SSIM回帰も成功。実素材評価と専用UIはまだ。最終コミットは0eda660、以降は未コミット。docs/04_Work_Instructions.mdはユーザー由来の既存未追跡ファイルとして扱い、自動で追加していない。次はgit statusと文書10を確認。新しいダウンロードは今回行っていない。
+
 Written 2026-11-14. Read this first, then [CLAUDE.md](../CLAUDE.md) (working rules) and [01_計画仕様書.md](01_計画仕様書.md) (plan and spec, in Japanese). Project background is in [Motion_Logic_Modeling_Codex_Handoff.md](Motion_Logic_Modeling_Codex_Handoff.md).
 
 The user wants blunt, realistic reporting: separate what was actually run and verified from what is untested or only proposed. Reply to the user in Japanese.

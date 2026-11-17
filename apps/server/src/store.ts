@@ -48,6 +48,15 @@ function readJson<T>(file: string): T {
   return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
 }
 
+export const DOCUMENT_NAMES = ['observations', 'hypotheses', 'motion_rules', 'simplification', 'adaptation'] as const;
+export type ProjectDocuments = Partial<Record<typeof DOCUMENT_NAMES[number], unknown>>;
+/** History is authoritative, so documents and scene are read at the same revision. */
+export function getDocuments(id: string): ProjectDocuments {
+  const { project } = getProject(id);
+  const file = path.join(projectDir(id), 'history', `r${String(project.revision).padStart(6, '0')}.json`);
+  return readJson<{ documents?: ProjectDocuments }>(file).documents ?? {};
+}
+
 /** スキーマ検査と整合性検査を通ったシーンだけを返す。 */
 export function checkScene(input: unknown): Scene {
   let scene: Scene;
@@ -77,9 +86,15 @@ export function getProject(id: string): { project: ProjectMeta; scene: Scene } {
   };
 }
 
-function writeRevision(dir: string, project: ProjectMeta, scene: Scene, actor: string, note: string): void {
+function writeRevision(dir: string, project: ProjectMeta, scene: Scene, actor: string, note: string, documents: ProjectDocuments = {}): void {
   const entry: HistoryEntry = { revision: project.revision, at: project.updatedAt, actor, note };
-  writeJson(path.join(dir, 'history', `r${String(project.revision).padStart(6, '0')}.json`), { ...entry, scene });
+  writeJson(path.join(dir, 'history', `r${String(project.revision).padStart(6, '0')}.json`), { ...entry, scene, documents });
+  // Human-readable mirrors; readers use the revision snapshot above, not these files.
+  for (const name of DOCUMENT_NAMES) {
+    const file=path.join(dir, `${name}.json`);
+    if(documents[name]!==undefined) writeJson(file,documents[name]);
+    else fs.rmSync(file,{force:true});
+  }
   writeJson(path.join(dir, 'scene.json'), scene);
   writeJson(path.join(dir, 'project.json'), project);
   events.emit('change', { projectId: project.id, revision: project.revision, actor } satisfies ChangeEvent);
@@ -103,11 +118,13 @@ export interface CommitInput {
   note: string;
   scene?: (current: Scene) => Scene;
   meta?: (current: ProjectMeta) => void;
+  documents?: (current: ProjectDocuments) => ProjectDocuments;
 }
 
 /** 変更を1リビジョンとして確定する。ファイル操作は同期なので他の変更と混ざらない。 */
 export function commit(id: string, input: CommitInput): { project: ProjectMeta; scene: Scene } {
   const { project, scene } = getProject(id);
+  const documents = getDocuments(id);
   if (input.baseRevision !== null && input.baseRevision !== project.revision) {
     throw new HttpError(
       409,
@@ -126,7 +143,8 @@ export function commit(id: string, input: CommitInput): { project: ProjectMeta; 
   project.schemaVersion = SCHEMA_VERSION;
   project.revision += 1;
   project.updatedAt = new Date().toISOString();
-  writeRevision(projectDir(id), project, next, input.actor, input.note);
+  const nextDocuments = input.documents ? input.documents(documents) : documents;
+  writeRevision(projectDir(id), project, next, input.actor, input.note, nextDocuments);
   return { project, scene: next };
 }
 
@@ -158,6 +176,6 @@ export function listHistory(id: string): HistoryEntry[] {
 export function revertTo(id: string, toRevision: number, baseRevision: number | null, actor: string) {
   const file = path.join(projectDir(id), 'history', `r${String(toRevision).padStart(6, '0')}.json`);
   if (!fs.existsSync(file)) throw new HttpError(404, `リビジョン ${toRevision} の控えがありません`);
-  const old = readJson<{ scene: Scene }>(file).scene;
-  return commit(id, { baseRevision, actor, note: `リビジョン ${toRevision} に戻す`, scene: () => old });
+  const old = readJson<{ scene: Scene; documents?: ProjectDocuments }>(file);
+  return commit(id, { baseRevision, actor, note: `リビジョン ${toRevision} に戻す`, scene: () => old.scene, documents: () => old.documents ?? {} });
 }

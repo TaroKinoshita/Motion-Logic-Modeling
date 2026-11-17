@@ -75,6 +75,7 @@ Motion Logic は、参考映像の「動きと演出構成」を単純な図形�
    色や細部を確かめるときは単一フレーム（times に1つ）か cell_width を大きくする。
 4. update_scene で図形と動きを書く。
 5. get_frames(kind="compare") で元動画と簡略版を並べて確認し、差を直す。
+6. compare_segment(project_id, from, to, width?) で区間SSIMを計測。数値にはrevision・元動画ハッシュ・寸法・フレーム数が付く。画素の類似度であり、演出理解や要素位置の誤差ではない。
 
 ## シーン (scene.json)
 - schemaVersionは2。v1は読み込み時に移行。座標はpx、原点は左上。x,yはアンカー位置（既定は中心）。数値時刻は秒で計測値を丸めない。
@@ -88,7 +89,23 @@ Motion Logic は、参考映像の「動きと演出構成」を単純な図形�
 - fill: "none" で塗りなし。未知のキーはエラーになる。
 - markers: [{ t, kind: "cut"|"beat"|"downbeat"|"section"|"note", label?, origin?: "measured"|"estimated"|"manual" }]
 
-## v2の関係記述
+## 拍推定
+- detect_beatsは元動画の音声をlibrosaで解析し、推定beatマーカーを保存する。手動マーカーは保持。再解析は推定beatだけ置き換える。
+- 推定BPM、onsets、RMS、ライブラリ版・パラメータ・入力ハッシュはproject.audioAnalysisに保存。scene.tempoは変更しない。
+- 拍は打楽器が止まる区間でも続き得る。キック検出・小節・サビの推定ではない。
+
+## M2〜M4の計測・モデル・再構成
+- model_project(project_id, operation, input) を使う。documentsは読取（inputなし）。他はinput.baseRevisionが必須。actorはMCPが設定する。
+- track-region: {baseRevision,from,to,region:{x,y,w,h}}。10秒以内のCFR動画から領域を追跡し、観察と線形キー近似を分離保存、推定領域の矩形を追加する。輪郭分解ではない。
+- measure-events: {baseRevision,events:[{label,t,origin:"manual"|"measured"|"estimated",elementId?}]}。最寄りbeatとの差。負=イベント先行、正=遅延。同距離は前の拍。
+- model: {baseRevision,hypotheses:[{id,text,observationIds:[ID],status:"proposed"|"accepted"|"rejected"}],rules:[{id,hypothesisId,kind:"hold",elementId,property:"x"|"y"|"scaleX"|"scaleY"|"rotation"|"opacity",keyIndex} または {id,hypothesisId,kind:"stagger",elementId}]}。配列を置換。規則の仮説はacceptedが必要。採用は仮説の証明ではない。
+- variant: {baseRevision,ruleId,seconds,name}。別プロジェクトを作成。holdは同値の連続キー間隔と後続キー時刻を変更（当該トラックだけ、繰返し不可、表示区間超過は拒否）。staggerは文字の時間差を変更。規則保存後にシーンが変わっていたら再確認が必要。
+- music: {baseRevision,path}。ローカルの120秒以内の音声を黒背景の動画として取り込む。既存と同じ再生・書き出し経路を使う。新規プロジェクトで実行後detect_beats、必要なら推定拍を修正する。
+- adapt: {baseRevision,targetProjectId,targetRevision,name,sections:[{sourceFrom,sourceTo,targetFrom,targetTo,elementIds:[ID],reason}]}。全要素を1区間ずつ明示し、親子は同一区間。形状・補間を保ち、区間内を一定倍率で時間変換。区間端で表示をクリップ。別プロジェクトに対象曲と理由を保存。自動の曲構成理解は行わない。
+- adapt-baselines: {baseRevision,targetProjectId,targetRevision,name}。全体速度のみ、最初/最後の拍合わせのみ、固定テンプレートの3版を作る。両シーンに2拍以上必要。拍の局所補正はしない。
+- documentsでobservations/hypotheses/motion_rules/simplification/adaptationを読む。シーンと同じ履歴に保存しrevertで一緒に戻る。生成結果は通常のget_frames/render_preview/UIで確認できる。
+
+## v2の関係記述（詳細）
 - scene.tempo: {bpm, offset}。拍0の秒時刻がoffset。Key.tとinPoint/outPointは秒か{beat, offsetSeconds?}。
 - 時刻=offset+beat*60/bpm+offsetSeconds。拍は0始まり・四分音符単位。長さは秒か{beats}（offsetを足さない）。
 - textのsplit:"char"|"word"、stagger:{interval,order?:"forward"|"reverse"}、unitTransform。
@@ -116,7 +133,7 @@ Motion Logic は、参考映像の「動きと演出構成」を単純な図形�
 ## 記述の原則
 - 観察（何がいつ動いたか）と仮説（なぜそうしたか）を混ぜない。要素の note には置換の理由を書く。
 - 単語が一括で動くのか一文字ずつずれるのか等、動きの単位を潰さない。
-- 現時点で未実装: 拍・区間などの音声解析、自動の分割・追跡、仮説・規則の保存、AE/Blender出力。
+- 現時点で未実装: 小節・区間の音声解析、自動の分割・追跡、仮説・規則の保存、AE/Blender出力。
 `;
 
 const server = new McpServer({ name: 'motion-logic', version: '0.1.0' });
@@ -205,9 +222,11 @@ server.registerTool(
       count: z.number().int().min(1).max(24).optional(),
       cell_width: z.number().int().min(64).max(1280).optional().describe('1コマの幅px。既定は単一640、複数320。'),
       columns: z.number().int().min(1).max(8).optional(),
+      region: z.object({ x: z.number().int().nonnegative(), y: z.number().int().nonnegative(), w: z.number().int().positive(), h: z.number().int().positive() }).optional().describe('元動画pxでの切り出し領域。compareは両側へ同じ領域を適用'),
+      grid_step: z.number().int().min(8).max(2048).optional().describe('元動画pxでの座標目盛り間隔'),
     },
   },
-  tool(async (a: { project_id: string; kind: string; times?: number[]; from?: number; to?: number; count?: number; cell_width?: number; columns?: number }) => {
+  tool(async (a: { project_id: string; kind: string; times?: number[]; from?: number; to?: number; count?: number; cell_width?: number; columns?: number; region?: { x: number; y: number; w: number; h: number }; grid_step?: number }) => {
     await ensureServer();
     const q = new URLSearchParams({ kind: a.kind });
     if (a.times?.length) q.set('times', a.times.join(','));
@@ -216,6 +235,8 @@ server.registerTool(
     if (a.count !== undefined) q.set('count', String(a.count));
     if (a.cell_width !== undefined) q.set('cellWidth', String(a.cell_width));
     if (a.columns !== undefined) q.set('columns', String(a.columns));
+    if (a.region) q.set('region', JSON.stringify(a.region));
+    if (a.grid_step !== undefined) q.set('gridStep', String(a.grid_step));
     const res = await fetch(`${BASE}/api/projects/${a.project_id}/frames?${q}`);
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
@@ -303,6 +324,21 @@ server.registerTool(
     return [text({ revision: r.project.revision })];
   }),
 );
+
+server.registerTool('detect_beats', {
+  description: '元動画の拍とBPMを推定してbeatマーカーを保存。手動修正を保持。シーンtempoは変更しない。',
+  inputSchema: { project_id: z.string(), base_revision: z.number().int() },
+}, tool(async (a: { project_id: string; base_revision: number }) => [text(await call('POST', `/api/projects/${a.project_id}/detect-beats`, { baseRevision: a.base_revision, actor: ACTOR }))]));
+
+server.registerTool('model_project', {
+  description: '計測・仮説・規則・比較版・別曲への区間対応。詳しい入力はget_guide。更新はbaseRevision必須。',
+  inputSchema: { project_id:z.string(), operation:z.enum(['documents','track-region','measure-events','model','variant','adapt','adapt-baselines','music']), input:z.record(z.string(),z.unknown()).optional() },
+}, tool(async (a:{project_id:string;operation:string;input?:Record<string,unknown>}) => [text(await call(a.operation==='documents'?'GET':'POST',`/api/projects/${a.project_id}/${a.operation}`,a.operation==='documents'?undefined:{...a.input,actor:ACTOR}))]));
+
+server.registerTool('compare_segment', {
+  description: '元動画と簡略版の指定区間をSSIMで比較。区間・revision・比較条件付きの数値を返す。最大120秒。',
+  inputSchema: { project_id: z.string(), from: z.number().nonnegative(), to: z.number().positive(), width: z.number().int().min(160).max(1920).optional() },
+}, tool(async (a: { project_id: string; from: number; to: number; width?: number }) => [text(await call('POST', `/api/projects/${a.project_id}/compare`, { from: a.from, to: a.to, width: a.width }))]));
 
 await server.connect(new StdioServerTransport());
 console.error(`[motion-logic mcp] ready (server: ${BASE})`);

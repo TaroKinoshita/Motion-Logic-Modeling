@@ -6,3 +6,4 @@ export * from './time.ts';
 export * from './migrate.ts';
 export * from './text.ts';
 export * from './timeline.ts';
+export * from './adapt.ts';

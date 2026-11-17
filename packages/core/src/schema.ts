@@ -137,6 +137,7 @@ export interface SourceManifest {
 }
 
 export interface ProjectMeta {
+  audioAnalysis?: Record<string, unknown>;
   id: string;
   name: string;
   schemaVersion: number;
