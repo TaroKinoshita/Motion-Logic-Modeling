@@ -5,10 +5,11 @@
 //   data/projects/<id>/history/       リビジョンごとのシーンの控え（巻き戻し用）
 //   data/projects/<id>/media/         取り込んだ元動画
 //   data/projects/<id>/cache/         抽出フレームなど再生成できるもの
+import { checkFonts } from './fonts.ts';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
-import { SCHEMA_VERSION, SceneSchema, validateScene } from '@mlm/core';
+import { SCHEMA_VERSION, migrateScene, validateScene } from '@mlm/core';
 import type { HistoryEntry, ProjectMeta, Scene } from '@mlm/core';
 
 export const REPO_ROOT = path.resolve(import.meta.dirname, '../../..');
@@ -49,13 +50,13 @@ function readJson<T>(file: string): T {
 
 /** スキーマ検査と整合性検査を通ったシーンだけを返す。 */
 export function checkScene(input: unknown): Scene {
-  const parsed = SceneSchema.safeParse(input);
-  if (!parsed.success) {
-    throw new HttpError(422, 'シーンがスキーマに合いません', parsed.error.issues);
-  }
-  const issues = validateScene(parsed.data);
+  let scene: Scene;
+  try { scene = migrateScene(input); }
+  catch (err) { throw new HttpError(422, 'シーンがスキーマに合いません', String(err)); }
+  try { checkFonts(scene); } catch (err) { throw new HttpError(422, String(err)); }
+  const issues = validateScene(scene);
   if (issues.length) throw new HttpError(422, 'シーンの整合性に問題があります', issues);
-  return parsed.data;
+  return scene;
 }
 
 export function listProjects(): ProjectMeta[] {
@@ -72,7 +73,7 @@ export function getProject(id: string): { project: ProjectMeta; scene: Scene } {
   if (!fs.existsSync(path.join(dir, 'project.json'))) throw new HttpError(404, `プロジェクト ${id} がありません`);
   return {
     project: readJson<ProjectMeta>(path.join(dir, 'project.json')),
-    scene: readJson<Scene>(path.join(dir, 'scene.json')),
+    scene: checkScene(readJson<unknown>(path.join(dir, 'scene.json'))),
   };
 }
 
@@ -122,6 +123,7 @@ export function commit(id: string, input: CommitInput): { project: ProjectMeta; 
     throw new HttpError(422, (err as Error).message);
   }
   input.meta?.(project);
+  project.schemaVersion = SCHEMA_VERSION;
   project.revision += 1;
   project.updatedAt = new Date().toISOString();
   writeRevision(projectDir(id), project, next, input.actor, input.note);

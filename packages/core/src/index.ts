@@ -2,3 +2,7 @@ export * from './schema.ts';
 export * from './evaluate.ts';
 export * from './draw.ts';
 export * from './ops.ts';
+export * from './time.ts';
+export * from './migrate.ts';
+export * from './text.ts';
+export * from './timeline.ts';

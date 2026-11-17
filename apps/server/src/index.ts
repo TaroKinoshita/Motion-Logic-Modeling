@@ -10,6 +10,7 @@ import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import { applyOps, demoScene, emptyScene, SceneOpSchema } from '@mlm/core';
 import type { Scene } from '@mlm/core';
+import { fonts } from './fonts.ts';
 import { exportVideo } from './export.ts';
 import { clearCache, detectCuts, mediaTarget, probe, sourcePath, waveform } from './media.ts';
 import { renderSheet, spreadTimes } from './render.ts';
@@ -50,6 +51,13 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
 const Actor = z.string().min(1).max(40).default('human');
 
 app.get('/api/health', (c) => c.json({ ok: true, app: 'motion-logic', dataDir: DATA_DIR }));
+
+app.get('/api/fonts', c => c.json({ fonts: fonts.map(({ id, family, weight }) => ({ id, family, weight, url: `/api/fonts/${id}` })) }));
+app.get('/api/fonts/:id', c => {
+  const font = fonts.find(f => f.id === c.req.param('id'));
+  if (!font) throw new HttpError(404, 'フォントがありません');
+  return new Response(new Uint8Array(fs.readFileSync(font.path)), { headers: { 'content-type': 'font/ttf' } });
+});
 
 app.get('/api/projects', (c) => c.json({ projects: listProjects() }));
 

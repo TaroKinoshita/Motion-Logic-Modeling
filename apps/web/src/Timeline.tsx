@@ -1,5 +1,5 @@
 import type { MouseEvent, PointerEvent } from 'react';
-import { shiftKeyTimeOps } from '@mlm/core';
+import { timelineKeys, resolveTime, shiftKeyTimeOps } from '@mlm/core';
 import type { Scene, SceneElement, SceneOp } from '@mlm/core';
 
 export interface LoopRange {
@@ -21,14 +21,6 @@ interface Props {
   onSelect: (id: string) => void;
   onKeyPreview: (ops: SceneOp[] | null) => void;
   onKeyCommit: (ops: SceneOp[], note: string) => void;
-}
-
-function keyTimes(el: SceneElement): number[] {
-  const set = new Set<number>();
-  for (const track of Object.values(el.transform ?? {})) {
-    if (typeof track === 'object') for (const k of track.keys) set.add(k.t);
-  }
-  return [...set].sort((a, b) => a - b);
 }
 
 function wavePath(peaks: number[]): string {
@@ -111,34 +103,34 @@ export function Timeline({ scene, baseScene, time, selectedId, range, peaks, onS
             </div>
           </div>
         )}
-        {scene.elements.map((el) => (
+        {scene.elements.map((el) => { const timeline = timelineKeys(el, scene); return (
           <div key={el.id} className={`row ${el.id === selectedId ? 'selected' : ''}`} onClick={() => onSelect(el.id)}>
             <div className="name" title={el.note}>
-              {el.name ?? el.id}
+              {el.name ?? el.id}{timeline.truncated ? '（キー表示省略あり）' : ''}
             </div>
             <div className="lane" onMouseDown={seekFrom}>
               <span
                 className="bar"
                 style={{
-                  left: pct(el.inPoint ?? 0),
-                  width: `calc(${pct(el.outPoint ?? scene.duration)} - ${pct(el.inPoint ?? 0)})`,
+                  left: pct(resolveTime(el.inPoint ?? 0, scene.tempo)),
+                  width: `calc(${pct(resolveTime(el.outPoint ?? scene.duration, scene.tempo))} - ${pct(resolveTime(el.inPoint ?? 0, scene.tempo))})`,
                   background: el.type === 'group' ? '#555' : el.fill && el.fill !== 'none' ? el.fill : el.stroke,
                 }}
               />
-              {keyTimes(el).map((t, i) => (
+              {timeline.times.map((t, i) => (
                 <span
                   key={i}
                   className="key"
                   style={{ left: pct(t) }}
-                  title={`${t}秒（左右にドラッグで時刻を移動）`}
+                  title={`${t}秒${timeline.readOnly ? '（関係から展開・JSONで編集）' : '（ドラッグで移動）'}`}
                   onMouseDown={(e) => e.stopPropagation()}
-                  onPointerDown={(e) => startKeyDrag(e, el.id, t)}
+                  onPointerDown={(e) => { if (!timeline.readOnly) startKeyDrag(e, el.id, t); }}
                 />
               ))}
               <span className="playhead" style={{ left: pct(time) }} />
             </div>
           </div>
-        ))}
+        ); })}
       </div>
     </div>
   );

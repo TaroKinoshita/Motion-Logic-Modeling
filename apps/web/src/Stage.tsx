@@ -2,6 +2,8 @@ import { useEffect, useRef } from 'react';
 import type { PointerEvent, RefObject } from 'react';
 import {
   drawFrame,
+  canvasMeasurer,
+  selectionFrame,
   evaluateScene,
   hitTest,
   moveElementOps,
@@ -75,6 +77,7 @@ const NOTES = { move: 'ドラッグで移動', scale: 'ドラッグで拡縮', r
 export function Stage({ scene, baseScene, time, mode, videoUrl, videoRef, selectedId, onSelect, onDragPreview, onDragCommit }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drag = useRef<Drag | null>(null);
+  const trajectoryCache = useRef<{ scene: Scene; id: string; paths: Map<number, Array<{x: number; y: number}>> } | null>(null);
   const overlay = mode === 'overlay' && !!videoUrl;
 
   /** シーン1pxあたりの画面px の逆数（画面上の1pxがシーンで何pxか）。 */
@@ -91,20 +94,31 @@ export function Stage({ scene, baseScene, time, mode, videoUrl, videoRef, select
     const px = pxScaleOf(canvas);
 
     // 選択中の要素の軌道。点はフレームごとなので、点の間隔が速さを表す。
-    const path = sampleTrajectory(scene, selectedId);
-    const xs = path.map((p) => p.x);
-    const ys = path.map((p) => p.y);
-    if (path.length > 1 && Math.max(...xs) - Math.min(...xs) + Math.max(...ys) - Math.min(...ys) > 1) {
+    const selected = scene.elements.find(el => el.id === selectedId);
+    const cached = trajectoryCache.current;
+    const paths = cached?.scene === scene && cached.id === selectedId ? cached.paths : new Map<number, Array<{x: number; y: number}>>();
+    if (paths !== cached?.paths) {
+    if (selected?.split) {
+      for (let t = 0; t < scene.duration; t += Math.max(1 / scene.fps, scene.duration / 300)) {
+        for (const unit of evaluateScene(scene, t, canvasMeasurer(ctx)).filter(e => e.element.id === selectedId && e.opacity > 0)) {
+          const key = unit.unitIndex ?? 0;
+          if (!paths.has(key)) paths.set(key, []);
+          paths.get(key)!.push({ x: unit.cx, y: unit.cy });
+        }
+      }
+    } else paths.set(0, sampleTrajectory(scene, selectedId));
+    trajectoryCache.current = { scene, id: selectedId, paths };
+    }
+    for (const path of paths.values()) {
+      if (path.length < 2) continue;
       ctx.strokeStyle = 'rgba(51,208,255,0.45)';
       ctx.lineWidth = 1.5 * px;
       ctx.beginPath();
       path.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
       ctx.stroke();
-      ctx.fillStyle = 'rgba(51,208,255,0.9)';
-      for (const p of path) ctx.fillRect(p.x - px, p.y - px, 2 * px, 2 * px);
     }
 
-    const sel = evaluateScene(scene, time).find((e) => e.element.id === selectedId);
+    const sel = selectionFrame(scene, selectedId, time, canvasMeasurer(ctx));
     if (!sel) return;
     const h = handlesOf(sel, px, scene.width, scene.height);
     ctx.strokeStyle = '#33d0ff';
@@ -140,13 +154,13 @@ export function Stage({ scene, baseScene, time, mode, videoUrl, videoRef, select
       drag.current = { kind, id, startX: p.x, startY: p.y, cx, cy, ops: [] };
     };
     // 先に、選択中の要素のハンドル（回転・拡縮）を調べる。
-    const sel = selectedId ? evaluateScene(scene, time).find((x) => x.element.id === selectedId) : undefined;
+    const sel = selectedId ? selectionFrame(scene, selectedId, time, canvasMeasurer(e.currentTarget.getContext('2d')!)) : undefined;
     if (sel) {
       const h = handlesOf(sel, px, scene.width, scene.height);
       if (near(h.rotate)) return start('rotate', sel.element.id, sel.cx, sel.cy);
       if (h.corners.some(near)) return start('scale', sel.element.id, sel.cx, sel.cy);
     }
-    const hit = hitTest(scene, time, p.x, p.y);
+    const hit = hitTest(scene, time, p.x, p.y, canvasMeasurer(e.currentTarget.getContext('2d')!));
     onSelect(hit?.element.id ?? null);
     if (hit) start('move', hit.element.id, hit.cx, hit.cy);
   };

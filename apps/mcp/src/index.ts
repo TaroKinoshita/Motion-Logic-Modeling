@@ -77,7 +77,7 @@ Motion Logic は、参考映像の「動きと演出構成」を単純な図形�
 5. get_frames(kind="compare") で元動画と簡略版を並べて確認し、差を直す。
 
 ## シーン (scene.json)
-- 座標は px、原点は左上。要素の x,y は要素の中心。時刻はすべて秒（拍などに丸めない）。
+- schemaVersionは2。v1は読み込み時に移行。座標はpx、原点は左上。x,yはアンカー位置（既定は中心）。数値時刻は秒で計測値を丸めない。
 - element: { id, name?, type: "rect"|"ellipse"|"text"|"group", parentId?, inPoint?, outPoint?, zIndex?,
     width?, height?, cornerRadius?, fill?, stroke?, strokeWidth?, text?, fontSize?, fontWeight?, transform?, note? }
 - transform: { x, y, scaleX, scaleY, rotation(度), opacity(0..1) }。各値は数値（固定）か
@@ -88,11 +88,25 @@ Motion Logic は、参考映像の「動きと演出構成」を単純な図形�
 - fill: "none" で塗りなし。未知のキーはエラーになる。
 - markers: [{ t, kind: "cut"|"beat"|"downbeat"|"section"|"note", label?, origin?: "measured"|"estimated"|"manual" }]
 
+## v2の関係記述
+- scene.tempo: {bpm, offset}。拍0の秒時刻がoffset。Key.tとinPoint/outPointは秒か{beat, offsetSeconds?}。
+- 時刻=offset+beat*60/bpm+offsetSeconds。拍は0始まり・四分音符単位。長さは秒か{beats}（offsetを足さない）。
+- textのsplit:"char"|"word"、stagger:{interval,order?:"forward"|"reverse"}、unitTransform。
+  transformは全体に適用し、unitTransformだけを単位の順序×interval遅らせる。単位x/yは組版位置からの差分。
+  登場前を隠すにはunitTransform.opacityを0から始める。charは書記素単位（空白も順序に数える）、wordは空白区切り（空白は幅のみ）。一行のみ。
+- letterSpacingはsplit時のみ。fontFamilyは現在"MLM Arial"（fontWeight 400/700）を登録。同じローカルファイルをUIとサーバーで使う。未登録指定はエラー。
+- anchorX/anchorYは中心原点のローカルpx。行列はT(x,y) R S T(-anchor)。既定0でv1の見た目を保持。
+- キートラックにrepeat:{every,count? または until?}。everyは正の長さ、countは初回込み。最初のキーから繰り返す。
+  キー範囲は1周期以内。周期末は最終値を保持し、次周期の境界で先頭へ。終了後は終了直前の値を保持。
+- BPM変更は拍指定だけに作用。秒指定・元動画音声・scene.durationは変わらない。キー順が逆転する更新は拒否。
+- 分割・反復・拍キーのタイムライン表示は読取専用。JSON/opsで関係を変更する。
+- 推定マーカーはsetMarkersでoriginをmanualにして確定、配列から除いて却下。UIの右パネルからも操作可能。
+
 ## update_scene の ops
 - { op: "upsertElement", element }            同じidは丸ごと置換、なければ追加
 - { op: "patchElement", id, patch }           一部だけ上書き（transformはトラック単位でマージ）
 - { op: "removeElement", id }
-- { op: "setSceneProps", props: { width?, height?, fps?, duration?, background? } }
+- { op: "setSceneProps", props: { width?, height?, fps?, duration?, background?, tempo? } }
 - { op: "setMarkers", markers }
 
 ## リビジョン

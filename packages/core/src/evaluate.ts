@@ -1,4 +1,8 @@
 // 任意時刻 t でのシーン状態を決定的に求める。描画・比較・計測の共通の入口。
+import { resolveTime, resolveDuration, resolvedKeys, repeatTime } from './time.ts';
+import { layoutText } from './text.ts';
+import type { TextMeasurer } from './text.ts';
+import type { Tempo } from './schema.ts';
 import type { Ease, Scene, SceneElement, Track } from './schema.ts';
 
 export type Mat = [number, number, number, number, number, number];
@@ -37,10 +41,11 @@ export function applyEase(ease: Ease | undefined, p: number): number {
 }
 
 /** トラックの値。最初のキーより前・最後のキーより後は端の値を保持する。 */
-export function sampleTrack(track: Track | undefined, t: number, fallback: number): number {
+export function sampleTrack(track: Track | undefined, t: number, fallback: number, tempo?: Tempo): number {
   if (track === undefined) return fallback;
   if (typeof track === 'number') return track;
-  const keys = track.keys;
+  const keys = resolvedKeys(track, tempo);
+  t = repeatTime(track, t, tempo);
   if (t <= keys[0].t) return keys[0].v;
   const last = keys[keys.length - 1];
   if (t >= last.t) return last.v;
@@ -67,20 +72,23 @@ export function multiply(m: Mat, n: Mat): Mat {
   ];
 }
 
-export function localMatrix(el: SceneElement, t: number): Mat {
+export function localMatrix(el: SceneElement, t: number, tempo?: Tempo): Mat {
   const tr = el.transform ?? {};
-  const x = sampleTrack(tr.x, t, 0);
-  const y = sampleTrack(tr.y, t, 0);
-  const sx = sampleTrack(tr.scaleX, t, 1);
-  const sy = sampleTrack(tr.scaleY, t, 1);
-  const r = (sampleTrack(tr.rotation, t, 0) * Math.PI) / 180;
+  const x = sampleTrack(tr.x, t, 0, tempo);
+  const y = sampleTrack(tr.y, t, 0, tempo);
+  const sx = sampleTrack(tr.scaleX, t, 1, tempo);
+  const sy = sampleTrack(tr.scaleY, t, 1, tempo);
+  const r = (sampleTrack(tr.rotation, t, 0, tempo) * Math.PI) / 180;
   const cos = Math.cos(r);
   const sin = Math.sin(r);
-  return [cos * sx, sin * sx, -sin * sy, cos * sy, x, y];
+  const a = cos * sx, b = sin * sx, c = -sin * sy, d = cos * sy;
+  const ax = el.anchorX ?? 0, ay = el.anchorY ?? 0;
+  return [a, b, c, d, x - a * ax - c * ay, y - b * ax - d * ay];
 }
 
 export interface EvaluatedElement {
   element: SceneElement;
+  unitIndex?: number;
   /** シーン座標への変換行列（親の変換を合成済み）。原点は要素の中心。 */
   matrix: Mat;
   opacity: number;
@@ -92,7 +100,7 @@ export interface EvaluatedElement {
 }
 
 export function isActive(el: SceneElement, scene: Scene, t: number): boolean {
-  return t >= (el.inPoint ?? 0) && t < (el.outPoint ?? scene.duration + 1e-9);
+  return t >= resolveTime(el.inPoint ?? 0, scene.tempo) && t < resolveTime(el.outPoint ?? scene.duration + 1e-9, scene.tempo);
 }
 
 /** 要素の大きさ。text は文字数とフォントサイズからの概算（選択枠・当たり判定用）。 */
@@ -114,14 +122,15 @@ export function worldMatrixOf(scene: Scene, id: string | undefined, t: number): 
     chain.unshift(cur);
     cur = cur.parentId ? byId.get(cur.parentId) : undefined;
   }
-  for (const el of chain) m = multiply(m, localMatrix(el, t));
+  for (const el of chain) m = multiply(m, localMatrix(el, t, scene.tempo));
   return m;
 }
 
 /** シーン座標の点 (x,y) にある一番手前の要素。なければ null。 */
-export function hitTest(scene: Scene, t: number, x: number, y: number): EvaluatedElement | null {
-  const list = evaluateScene(scene, t);
+export function hitTest(scene: Scene, t: number, x: number, y: number, measure?: TextMeasurer): EvaluatedElement | null {
+  const list = evaluateScene(scene, t, measure);
   for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i].opacity <= 0) continue;
     const [a, b, c, d, e, f] = list[i].matrix;
     const det = a * d - b * c;
     if (Math.abs(det) < 1e-12) continue;
@@ -133,13 +142,13 @@ export function hitTest(scene: Scene, t: number, x: number, y: number): Evaluate
 }
 
 /** 時刻 t に表示される要素を、描画順（zIndex昇順、同値は配列順）で返す。 */
-export function evaluateScene(scene: Scene, t: number): EvaluatedElement[] {
+export function evaluateScene(scene: Scene, t: number, measure?: TextMeasurer): EvaluatedElement[] {
   const byId = new Map(scene.elements.map((e) => [e.id, e]));
   const cache = new Map<string, Mat>();
   const world = (el: SceneElement, depth: number): Mat => {
     const hit = cache.get(el.id);
     if (hit) return hit;
-    let m = localMatrix(el, t);
+    let m = localMatrix(el, t, scene.tempo);
     const parent = el.parentId ? byId.get(el.parentId) : undefined;
     if (parent && depth < 64) m = multiply(world(parent, depth + 1), m);
     cache.set(el.id, m);
@@ -149,15 +158,40 @@ export function evaluateScene(scene: Scene, t: number): EvaluatedElement[] {
     .map((element, index) => ({ element, index }))
     .filter(({ element }) => element.type !== 'group' && isActive(element, scene, t))
     .sort((a, b) => (a.element.zIndex ?? 0) - (b.element.zIndex ?? 0) || a.index - b.index)
-    .map(({ element }) => {
+    .flatMap(({ element }): EvaluatedElement[] => {
       const matrix = world(element, 0);
-      return {
+      if (element.split) {
+        if (!measure) throw new Error('分割文字の評価には文字計測が必要です');
+        const layout = layoutText(element, measure);
+        return layout.units.filter(u => u.rank >= 0 && !/^\s+$/u.test(u.text)).map(u => {
+          const rank = element.stagger?.order === 'reverse' ? layout.count - 1 - u.rank : u.rank;
+          const ut = t - rank * resolveDuration(element.stagger?.interval ?? 0, scene.tempo);
+          const local = localMatrix({ id: element.id, type: 'text', transform: element.unitTransform }, ut, scene.tempo);
+          local[4] += u.x;
+          const m = multiply(matrix, local);
+          return { element: { ...element, text: u.text }, unitIndex: u.index, matrix: m,
+            opacity: Math.min(1, Math.max(0, sampleTrack(element.transform?.opacity, t, 1, scene.tempo))) * Math.min(1, Math.max(0, sampleTrack(element.unitTransform?.opacity, ut, 1, scene.tempo))),
+            width: u.width, height: (element.fontSize ?? 48) * 1.2, cx: m[4], cy: m[5] };
+        });
+      }
+      return [{
         element,
         matrix,
-        opacity: Math.min(1, Math.max(0, sampleTrack(element.transform?.opacity, t, 1))),
+        opacity: Math.min(1, Math.max(0, sampleTrack(element.transform?.opacity, t, 1, scene.tempo))),
         ...elementSize(element),
         cx: matrix[4],
         cy: matrix[5],
-      };
+      }];
     });
+}
+
+/** A source element's unanimated text layout defines the whole-element manipulation frame. */
+export function selectionFrame(scene: Scene, id: string, t: number, measure: TextMeasurer): EvaluatedElement | undefined {
+  const element = scene.elements.find(e => e.id === id);
+  if (!element || !isActive(element, scene, t)) return undefined;
+  const matrix = worldMatrixOf(scene, id, t);
+  const size = element.split ? { width: layoutText(element, measure).width, height: (element.fontSize ?? 48) * 1.2 } : elementSize(element);
+  const ax = element.anchorX ?? 0, ay = element.anchorY ?? 0;
+  return { element, matrix, ...size, opacity: 1,
+    cx: matrix[0] * ax + matrix[2] * ay + matrix[4], cy: matrix[1] * ax + matrix[3] * ay + matrix[5] };
 }

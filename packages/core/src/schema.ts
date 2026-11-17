@@ -3,7 +3,14 @@
 // 未知のキーはエラーにする（AIの書き間違いを黙って捨てないため）。
 import { z } from 'zod';
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
+
+export const TimeSchema = z.union([z.number(), z.strictObject({ beat: z.number(), offsetSeconds: z.number().optional() })]);
+export const DurationSchema = z.union([z.number().nonnegative(), z.strictObject({ beats: z.number().nonnegative() })]);
+export const TempoSchema = z.strictObject({ bpm: z.number().positive(), offset: z.number() });
+export type Time = z.infer<typeof TimeSchema>;
+export type Duration = z.infer<typeof DurationSchema>;
+export type Tempo = z.infer<typeof TempoSchema>;
 
 /** キーから次のキーまでの区間の補間。cubicは CSS cubic-bezier と同じ4値。 */
 export const EaseSchema = z.union([
@@ -12,17 +19,19 @@ export const EaseSchema = z.union([
 ]);
 
 export const KeySchema = z.strictObject({
-  /** 秒。シーン先頭からの絶対時刻。拍などに丸めない。 */
-  t: z.number(),
+  /** 数値は秒の絶対時刻。生成する動きは拍指定も可能。計測値を丸めない。 */
+  t: TimeSchema,
   v: z.number(),
   ease: EaseSchema.optional(),
 });
 
 /** 数値なら固定値、keysならキーフレーム。 */
-export const TrackSchema = z.union([z.number(), z.strictObject({ keys: z.array(KeySchema).min(1) })]);
+export const TrackSchema = z.union([z.number(), z.strictObject({ keys: z.array(KeySchema).min(1), repeat: z.strictObject({
+  every: DurationSchema, count: z.number().int().positive().optional(), until: TimeSchema.optional(),
+}).optional() })]);
 
 export const TransformSchema = z.strictObject({
-  /** 要素中心の位置（px）。親がある場合は親のローカル座標。 */
+  /** アンカー位置（px、既定は要素中心）。親がある場合は親のローカル座標。 */
   x: TrackSchema.optional(),
   y: TrackSchema.optional(),
   scaleX: TrackSchema.optional(),
@@ -39,9 +48,9 @@ export const ElementSchema = z.strictObject({
   /** group は描画されない変換の親（AEのヌル相当）。 */
   type: z.enum(['rect', 'ellipse', 'text', 'group']),
   parentId: z.string().optional(),
-  /** 表示区間（秒）。省略時は 0 〜 scene.duration。 */
-  inPoint: z.number().optional(),
-  outPoint: z.number().optional(),
+  /** 表示区間（秒または拍時刻）。省略時は 0 〜 scene.duration。 */
+  inPoint: TimeSchema.optional(),
+  outPoint: TimeSchema.optional(),
   zIndex: z.number().optional(),
   width: z.number().optional(),
   height: z.number().optional(),
@@ -50,6 +59,13 @@ export const ElementSchema = z.strictObject({
   stroke: z.string().optional(),
   strokeWidth: z.number().optional(),
   text: z.string().optional(),
+  anchorX: z.number().optional(),
+  anchorY: z.number().optional(),
+  fontFamily: z.string().min(1).optional(),
+  letterSpacing: z.number().optional(),
+  split: z.enum(['char', 'word']).optional(),
+  stagger: z.strictObject({ interval: DurationSchema, order: z.enum(['forward', 'reverse']).optional() }).optional(),
+  unitTransform: TransformSchema.optional(),
   fontSize: z.number().optional(),
   fontWeight: z.number().optional(),
   transform: TransformSchema.optional(),
@@ -72,6 +88,7 @@ export const SceneSchema = z.strictObject({
   fps: z.number().positive(),
   duration: z.number().positive(),
   background: z.string(),
+  tempo: TempoSchema.optional(),
   elements: z.array(ElementSchema),
   markers: z.array(MarkerSchema).optional(),
 });
@@ -85,7 +102,7 @@ export const SceneOpSchema = z.discriminatedUnion('op', [
   z.strictObject({ op: z.literal('removeElement'), id: z.string() }),
   z.strictObject({
     op: z.literal('setSceneProps'),
-    props: SceneSchema.pick({ width: true, height: true, fps: true, duration: true, background: true }).partial(),
+    props: SceneSchema.pick({ width: true, height: true, fps: true, duration: true, background: true, tempo: true }).partial(),
   }),
   z.strictObject({ op: z.literal('setMarkers'), markers: z.array(MarkerSchema) }),
 ]);

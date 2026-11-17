@@ -64,6 +64,14 @@ export function Inspector({ data, history, selectedId, onApply, onAddRect, onSel
   return (
     <aside className="inspector">
       <section>
+        <h3>テンポ</h3>
+        <label>BPM <input type="number" min={1} defaultValue={scene.tempo?.bpm ?? 120} key={`bpm-${project.revision}`} onBlur={e => {
+          const bpm = Number(e.currentTarget.value);
+          if (bpm > 0 && bpm !== scene.tempo?.bpm) void onApply([{ op: 'setSceneProps', props: { tempo: { bpm, offset: scene.tempo?.offset ?? 0 } } }], 'テンポを変更');
+        }} /></label>
+        <p className="dim">拍で指定した動きが追従します。元動画と音声の速度は変わりません。</p>
+      </section>
+      <section>
         <h3>元動画</h3>
         {project.source ? (
           <p className="dim">
@@ -116,6 +124,19 @@ export function Inspector({ data, history, selectedId, onApply, onAddRect, onSel
         </h3>
         {selected ? (
           <>
+            {selected.type === 'text' && <div className="line">
+              <label>分割 <select value={selected.split ?? ''} onChange={e => {
+                const element = { ...selected };
+                if (e.currentTarget.value) element.split = e.currentTarget.value as 'char' | 'word';
+                else { delete element.split; delete element.stagger; delete element.unitTransform; delete element.letterSpacing; }
+                void onApply([{ op: 'upsertElement', element }], '文字分割を変更');
+              }}><option value="">なし</option><option value="char">文字</option><option value="word">単語</option></select></label>
+              {selected.split && <label>時間差（秒）<input type="number" min={0} step={0.01}
+                key={`stagger-${project.revision}`}
+                disabled={typeof selected.stagger?.interval === 'object'}
+                defaultValue={typeof selected.stagger?.interval === 'number' ? selected.stagger.interval : 0}
+                onBlur={e => { const interval = Number(e.currentTarget.value); if (interval >= 0) void onApply([{ op: 'patchElement', id: selected.id, patch: { stagger: { ...selected.stagger, interval } } }], '文字の時間差を変更'); }} /></label>}
+            </div>}
             <textarea value={draft} spellCheck={false} onChange={(e) => setDraft(e.target.value)} />
             {draftError && <pre className="error">{draftError}</pre>}
             <div className="line">
@@ -133,6 +154,18 @@ export function Inspector({ data, history, selectedId, onApply, onAddRect, onSel
         ) : (
           <p className="dim">タイムラインの行をクリックすると編集できます。</p>
         )}
+      </section>
+
+      <section>
+        <h3>推定マーカー</h3>
+        {(scene.markers ?? []).some(m => m.origin === 'estimated') ? <>
+          <button onClick={() => void onApply([{ op: 'setMarkers', markers: (scene.markers ?? []).filter(m => m.origin !== 'estimated') }], '推定マーカーを一括削除')}>推定分をすべて削除</button>
+          <ul className="history">{(scene.markers ?? []).map((m, index) => m.origin === 'estimated' && <li key={index}>
+            <span>{m.kind} {m.t.toFixed(3)}秒 {m.label ?? ''}</span>
+            <button onClick={() => void onApply([{ op: 'setMarkers', markers: (scene.markers ?? []).map((item, i) => i === index ? { ...item, origin: 'manual' } : item) }], `推定${m.kind} ${m.t}秒を確定`)}>確定</button>
+            <button onClick={() => void onApply([{ op: 'setMarkers', markers: (scene.markers ?? []).filter((_, i) => i !== index) }], `推定${m.kind} ${m.t}秒を却下`)}>却下</button>
+          </li>)}</ul>
+        </> : <p className="dim">確認待ちの推定マーカーはありません。</p>}
       </section>
 
       <section>

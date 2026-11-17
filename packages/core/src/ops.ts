@@ -1,5 +1,6 @@
 // シーンの部分更新と、スキーマでは表せない整合性の検査。純粋関数。
 import { SCHEMA_VERSION } from './schema.ts';
+import { resolveTime, resolveDuration, resolvedKeys } from './time.ts';
 import { worldMatrixOf } from './evaluate.ts';
 import type { Scene, SceneElement, SceneOp, Track } from './schema.ts';
 
@@ -86,18 +87,25 @@ export function validateScene(scene: Scene): string[] {
       seen.add(cur.id);
       cur = cur.parentId ? byId.get(cur.parentId) : undefined;
     }
-    if (el.inPoint !== undefined && el.outPoint !== undefined && el.outPoint <= el.inPoint) {
-      issues.push(`要素 "${el.id}" の outPoint が inPoint 以前です`);
-    }
-    for (const [name, track] of Object.entries(el.transform ?? {})) {
-      if (typeof track !== 'object') continue;
-      for (let i = 1; i < track.keys.length; i++) {
-        if (track.keys[i].t < track.keys[i - 1].t) {
-          issues.push(`要素 "${el.id}" の ${name} のキーが時刻順ではありません`);
-          break;
+    try {
+      if (resolveTime(el.outPoint ?? scene.duration, scene.tempo) <= resolveTime(el.inPoint ?? 0, scene.tempo)) issues.push(`要素 "${el.id}" の表示区間が逆転しています`);
+      if (el.type !== 'text' && (el.split || el.stagger || el.unitTransform || el.fontFamily || el.letterSpacing !== undefined)) issues.push(`要素 "${el.id}" はtextではありません`);
+      if (!el.split && (el.stagger || el.unitTransform || el.letterSpacing !== undefined)) issues.push(`要素 "${el.id}" の単位指定にはsplitが必要です`);
+      if (el.split && /[\r\n]/u.test(el.text ?? '')) issues.push(`要素 "${el.id}" の分割文字は一行にしてください`);
+      if (el.stagger) resolveDuration(el.stagger.interval, scene.tempo);
+      for (const tr of [el.transform, el.unitTransform]) for (const [name, track] of Object.entries(tr ?? {})) {
+        if (typeof track !== 'object') continue;
+        const keys = resolvedKeys(track, scene.tempo);
+        if (keys.some((k, i) => i > 0 && k.t < keys[i - 1].t)) issues.push(`要素 "${el.id}" の ${name} のキーが時刻順ではありません`);
+        if (track.repeat) {
+          const r = track.repeat, period = resolveDuration(r.every, scene.tempo);
+          if (!(period > 0)) issues.push(`要素 "${el.id}" のrepeat.everyは正の長さが必要です`);
+          if (r.count !== undefined && r.until !== undefined) issues.push('repeat.countとuntilは併記できません');
+          if (keys[keys.length - 1].t - keys[0].t > period + 1e-10) issues.push('反復キーの範囲が周期を超えています');
+          if (r.until !== undefined && resolveTime(r.until, scene.tempo) <= keys[0].t) issues.push('repeat.untilは開始より後にしてください');
         }
       }
-    }
+    } catch (err) { issues.push(`要素 "${el.id}": ${(err as Error).message}`); }
   }
   return issues;
 }
@@ -105,7 +113,7 @@ export function validateScene(scene: Scene): string[] {
 function offsetTrack(track: Track | undefined, delta: number): Track {
   if (track === undefined) return delta;
   if (typeof track === 'number') return round3(track + delta);
-  return { keys: track.keys.map((k) => ({ ...k, v: round3(k.v + delta) })) };
+  return { ...track, keys: track.keys.map((k) => ({ ...k, v: round3(k.v + delta) })) };
 }
 const round3 = (n: number) => Math.round(n * 1000) / 1000;
 
@@ -134,7 +142,7 @@ export function moveElementOps(scene: Scene, id: string, dx: number, dy: number,
 function scaleTrack(track: Track | undefined, factor: number): Track {
   if (track === undefined) return round3(factor);
   if (typeof track === 'number') return round3(track * factor);
-  return { keys: track.keys.map((k) => ({ ...k, v: round3(k.v * factor) })) };
+  return { ...track, keys: track.keys.map((k) => ({ ...k, v: round3(k.v * factor) })) };
 }
 
 /** 要素の拡縮を factor 倍する op。キーフレームなら全キーに掛ける（拡縮の変化の比率は保つ）。 */
@@ -167,13 +175,14 @@ export function shiftKeyTimeOps(scene: Scene, id: string, fromT: number, toT: nu
   const gap = 0.001;
   const transform: Record<string, Track> = {};
   for (const [name, track] of Object.entries(el.transform)) {
-    if (typeof track !== 'object') continue;
-    const i = track.keys.findIndex((k) => Math.abs(k.t - fromT) < 1e-6);
+    if (typeof track !== 'object' || track.repeat || track.keys.some(k => typeof k.t !== 'number')) continue;
+    const keys = resolvedKeys(track, scene.tempo);
+    const i = keys.findIndex((k) => Math.abs(k.t - fromT) < 1e-6);
     if (i < 0) continue;
-    const lo = i > 0 ? track.keys[i - 1].t + gap : 0;
-    const hi = i < track.keys.length - 1 ? track.keys[i + 1].t - gap : scene.duration;
+    const lo = i > 0 ? keys[i - 1].t + gap : 0;
+    const hi = i < track.keys.length - 1 ? keys[i + 1].t - gap : scene.duration;
     const t = round3(Math.min(Math.max(toT, lo), hi));
-    transform[name] = { keys: track.keys.map((k, j) => (j === i ? { ...k, t } : k)) };
+    transform[name] = { ...track, keys: track.keys.map((k, j) => (j === i ? { ...k, t } : k)) };
   }
   return Object.keys(transform).length ? [{ op: 'patchElement', id, patch: { transform } }] : [];
 }
@@ -182,8 +191,8 @@ export function shiftKeyTimeOps(scene: Scene, id: string, fromT: number, toT: nu
 export function sampleTrajectory(scene: Scene, id: string, maxPoints = 600): Array<{ t: number; x: number; y: number }> {
   const el = scene.elements.find((e) => e.id === id);
   if (!el) return [];
-  const from = el.inPoint ?? 0;
-  const to = Math.min(el.outPoint ?? scene.duration, scene.duration);
+  const from = resolveTime(el.inPoint ?? 0, scene.tempo);
+  const to = Math.min(resolveTime(el.outPoint ?? scene.duration, scene.tempo), scene.duration);
   const step = Math.max(1 / scene.fps, (to - from) / maxPoints);
   const points = [];
   for (let t = from; t <= to + 1e-9; t += step) {

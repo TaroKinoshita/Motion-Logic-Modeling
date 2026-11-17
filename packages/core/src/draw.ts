@@ -1,8 +1,9 @@
 // Canvas 2D への描画。ブラウザのプレビューとサーバー側のフレーム書き出しで同じ関数を使う。
+import { canvasMeasurer, fontSpec } from './text.ts';
 import { evaluateScene } from './evaluate.ts';
 import type { Scene } from './schema.ts';
 
-export const FONT_STACK = '"Yu Gothic", "Meiryo", "Noto Sans JP", sans-serif';
+export { FONT_STACK } from './text.ts';
 
 export interface DrawOptions {
   /** true なら背景を塗らず透明にする（元動画への重ね表示用）。 */
@@ -21,7 +22,7 @@ export function drawFrame(ctx: CanvasRenderingContext2D, scene: Scene, t: number
     ctx.fillStyle = scene.background;
     ctx.fillRect(0, 0, scene.width, scene.height);
   }
-  for (const ev of evaluateScene(scene, t)) {
+  for (const ev of evaluateScene(scene, t, canvasMeasurer(ctx))) {
     if (ev.opacity <= 0) continue;
     const el = ev.element;
     const [a, b, c, d, e, f] = ev.matrix;
@@ -32,7 +33,7 @@ export function drawFrame(ctx: CanvasRenderingContext2D, scene: Scene, t: number
     const w = ev.width;
     const h = ev.height;
     if (el.type === 'text') {
-      ctx.font = `${el.fontWeight ?? 700} ${el.fontSize ?? 48}px ${FONT_STACK}`;
+      ctx.font = fontSpec(el);
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(el.text ?? '', 0, 0);
