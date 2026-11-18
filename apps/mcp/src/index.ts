@@ -98,10 +98,11 @@ Motion Logic は、参考映像の「動きと演出構成」を単純な図形�
 - model_project(project_id, operation, input) を使う。documentsは読取（inputなし）。他はinput.baseRevisionが必須。actorはMCPが設定する。
 - track-region: {baseRevision,from,to,region:{x,y,w,h}}。10秒以内のCFR動画から領域を追跡し、観察と線形キー近似を分離保存、推定領域の矩形を追加する。輪郭分解ではない。
 - measure-events: {baseRevision,events:[{label,t,origin:"manual"|"measured"|"estimated",elementId?}]}。最寄りbeatとの差。負=イベント先行、正=遅延。同距離は前の拍。
-- model: {baseRevision,hypotheses:[{id,text,observationIds:[ID],status:"proposed"|"accepted"|"rejected"}],rules:[{id,hypothesisId,kind:"hold",elementId,property:"x"|"y"|"scaleX"|"scaleY"|"rotation"|"opacity",keyIndex} または {id,hypothesisId,kind:"stagger",elementId}]}。配列を置換。規則の仮説はacceptedが必要。採用は仮説の証明ではない。
+- model: {baseRevision,hypotheses:[{id,text,observationIds:[ID],status:"proposed"|"accepted"|"rejected"}],rules:[{id,hypothesisId,kind:"hold",elementId,property:"x"|"y"|"scaleX"|"scaleY"|"rotation"|"opacity",keyIndex} または {id,hypothesisId,kind:"stagger",elementId}]}。既定はID単位で追加・更新。全置換はinput.mode="replace"を明示。規則の仮説はacceptedが必要。採用は仮説の証明ではない。
 - variant: {baseRevision,ruleId,seconds,name}。別プロジェクトを作成。holdは同値の連続キー間隔と後続キー時刻を変更（当該トラックだけ、繰返し不可、表示区間超過は拒否）。staggerは文字の時間差を変更。規則保存後にシーンが変わっていたら再確認が必要。
+- 複数トラックの連動停止はrulesに {id,hypothesisId,kind:"hold_group",targets:[{elementId,property,keyIndex}]}。対象の停止開始・終了が同じであることを検査し、variantのsecondsで一括変更する。全対象が成功したときだけ生成する。音声は変更しない。
 - music: {baseRevision,path}。ローカルの120秒以内の音声を黒背景の動画として取り込む。既存と同じ再生・書き出し経路を使う。新規プロジェクトで実行後detect_beats、必要なら推定拍を修正する。
-- adapt: {baseRevision,targetProjectId,targetRevision,name,sections:[{sourceFrom,sourceTo,targetFrom,targetTo,elementIds:[ID],reason}]}。全要素を1区間ずつ明示し、親子は同一区間。形状・補間を保ち、区間内を一定倍率で時間変換。区間端で表示をクリップ。別プロジェクトに対象曲と理由を保存。自動の曲構成理解は行わない。
+- adapt: {baseRevision,targetProjectId,targetRevision,name,sections:[{sourceFrom,sourceTo,targetFrom,targetTo,elementIds:[ID],reason}]}。全要素の割当を明示。常時表示の背景・親・タイトルは連続する複数区間に同じIDを含める（複製しない）。親子は別区間も可能。秒キーは区間倍率で変換し、拍キーは新曲の拍へ対応、beatとtempoを保持。不等間隔な拍との差はoffsetSecondsに保存。拍情報がない場合に関係を秒へ黙って焼き込むことはしない。区間外の明示した表示範囲も保持。自動の曲構成理解は行わない。
 - adapt-baselines: {baseRevision,targetProjectId,targetRevision,name}。全体速度のみ、最初/最後の拍合わせのみ、固定テンプレートの3版を作る。両シーンに2拍以上必要。拍の局所補正はしない。
 - documentsでobservations/hypotheses/motion_rules/simplification/adaptationを読む。シーンと同じ履歴に保存しrevertで一緒に戻る。生成結果は通常のget_frames/render_preview/UIで確認できる。
 

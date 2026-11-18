@@ -135,6 +135,8 @@ UIの「拍を推定」、MCPの`detect_beats`、HTTPの`POST /api/projects/:id/
 
 ## M3・M4の初版（API / MCP）
 
+レビュー対応：拍指定を新曲へ対応させて保持、常時表示要素の複数区間割当、`hold_group`による複数トラック停止を追加。[仕様と制限](docs/11_Review_Relations_Fix.md)。
+
 MCPの `model_project(project_id, operation, input)` で次を実行できる。入力形式は `get_guide` に記載。HTTPは同名の `POST /api/projects/:id/<operation>`。更新にはbaseRevision、再構成にはtargetRevisionも必要。
 
 - `track-region`：領域追跡→観察保存→線形キー適用。

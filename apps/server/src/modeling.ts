@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { z } from 'zod';
-import { retimeSections, varyHold, demoScene } from '@mlm/core';
+import { retimeSections, varyHold, varyHoldGroup, demoScene } from '@mlm/core';
 import type { Scene } from '@mlm/core';
 import { checkScene, commit, createProject, getDocuments, getProject, HttpError, projectDir, trashProject } from './store.ts';
 import type { ProjectDocuments } from './store.ts';
@@ -13,11 +13,13 @@ const fingerprint=(scene:Scene)=>createHash('sha256').update(JSON.stringify(scen
 const Actor = z.string().min(1).max(40).default('human');
 export const MeasureRequest = z.strictObject({baseRevision:Revision,actor:Actor,events:z.array(z.strictObject({label:z.string().min(1),t:z.number().nonnegative(),origin:z.enum(['manual','measured','estimated']),elementId:z.string().optional()})).min(1).max(1000)});
 const Hypothesis = z.strictObject({id:z.string().min(1),text:z.string().min(1),observationIds:z.array(z.string()).min(1),status:z.enum(['proposed','accepted','rejected'])});
+const HoldTarget=z.strictObject({elementId:z.string(),property:z.enum(['x','y','scaleX','scaleY','rotation','opacity']),keyIndex:z.number().int().nonnegative()});
 const Rule = z.discriminatedUnion('kind',[
+  z.strictObject({id:z.string().min(1),hypothesisId:z.string(),kind:z.literal('hold_group'),targets:z.array(HoldTarget).min(1).max(100)}),
   z.strictObject({id:z.string().min(1),hypothesisId:z.string(),kind:z.literal('stagger'),elementId:z.string()}),
   z.strictObject({id:z.string().min(1),hypothesisId:z.string(),kind:z.literal('hold'),elementId:z.string(),property:z.enum(['x','y','scaleX','scaleY','rotation','opacity']),keyIndex:z.number().int().nonnegative()}),
 ]);
-export const ModelRequest = z.strictObject({baseRevision:Revision,actor:Actor,hypotheses:z.array(Hypothesis).max(100),rules:z.array(Rule).max(100)});
+export const ModelRequest = z.strictObject({baseRevision:Revision,actor:Actor,mode:z.enum(['merge','replace']).default('merge'),hypotheses:z.array(Hypothesis).max(100),rules:z.array(Rule).max(100)});
 export const VariantRequest = z.strictObject({baseRevision:Revision,actor:Actor,ruleId:z.string(),seconds:z.number().nonnegative(),name:z.string().min(1).max(100)});
 const Section = z.strictObject({sourceFrom:z.number().nonnegative(),sourceTo:z.number().positive(),targetFrom:z.number().nonnegative(),targetTo:z.number().positive(),elementIds:z.array(z.string()).min(1),reason:z.string().min(1)});
 export const AdaptRequest = z.strictObject({baseRevision:Revision,actor:Actor,targetProjectId:z.string(),targetRevision:Revision,name:z.string().min(1).max(100),sections:z.array(Section).min(1).max(100)});
@@ -44,9 +46,20 @@ export function saveModel(id:string,input:z.infer<typeof ModelRequest>) {
   const {scene}=current(id,input.baseRevision), docs=getDocuments(id);
   const observations=docs.observations as Record<string,unknown>??{};
   if(new Set(input.hypotheses.map(h=>h.id)).size!==input.hypotheses.length || new Set(input.rules.map(r=>r.id)).size!==input.rules.length) throw new HttpError(422,'IDが重複しています');
+  if(input.mode==='merge') {
+    const previous=z.object({rules:z.array(Rule),sceneSha256:z.string()}).optional().parse(docs.motion_rules);
+    if(previous && previous.sceneSha256!==fingerprint(scene) && previous.rules.some(r=>!input.rules.some(n=>n.id===r.id))) throw new HttpError(409,'シーン変更後の既存規則を再確認し、全規則を送信してください');
+    const merge=<T extends {id:string}>(old:T[],incoming:T[])=>[...new Map([...old,...incoming].map(v=>[v.id,v])).values()];
+    input={...input,hypotheses:merge(z.array(Hypothesis).parse(docs.hypotheses??[]),input.hypotheses),rules:merge(previous?.rules??[],input.rules)};
+    if(input.hypotheses.length>100||input.rules.length>100) throw new HttpError(422,'仮説・規則は各100件以内です');
+  }
   for(const h of input.hypotheses) for(const key of h.observationIds) if(!observations[key]) throw new HttpError(422,`観察 ${key} がありません`);
   for(const rule of input.rules) {
     if(!input.hypotheses.some(h=>h.id===rule.hypothesisId && h.status==='accepted')) throw new HttpError(422,'規則にはacceptedの仮説が必要です（採用は真偽の証明ではありません）');
+    if(rule.kind==='hold_group') {
+      try { varyHoldGroup(scene,rule.targets,0); } catch(err) {throw new HttpError(422,String(err));}
+      continue;
+    }
     if(!scene.elements.some(e=>e.id===rule.elementId)) throw new HttpError(422,'規則の対象要素がありません');
     const element=scene.elements.find(e=>e.id===rule.elementId)!;
     if(rule.kind==='stagger' && (!element.split||!element.stagger)) throw new HttpError(422,'stagger規則には分割文字と時間差が必要です');
@@ -78,6 +91,7 @@ export function generateVariant(id:string,input:z.infer<typeof VariantRequest>) 
   let next=structuredClone(scene);
   try {
     if(rule.kind==='hold') next=varyHold(scene,rule.elementId,rule.property,rule.keyIndex,input.seconds);
+    else if(rule.kind==='hold_group') next=varyHoldGroup(scene,rule.targets,input.seconds);
     else {
       const e=next.elements.find(e=>e.id===rule.elementId);
       if(!e?.split || !e.stagger) throw new Error('文字分割とstaggerのある要素が必要です');
@@ -90,12 +104,12 @@ export function generateAdaptation(id:string,input:z.infer<typeof AdaptRequest>)
   const source=current(id,input.baseRevision),target=current(input.targetProjectId,input.targetRevision);
   let scene:Scene;
   try {scene=retimeSections(source.scene,target.scene,input.sections);} catch(err) {throw new HttpError(422,String(err));}
-  return generated(input.name,scene,input.targetProjectId,input.actor,{...getDocuments(id),adaptation:{kind:'sections',sourceProjectId:id,sourceRevision:input.baseRevision,targetProjectId:input.targetProjectId,targetRevision:input.targetRevision,sourceSha256:source.project.source?.sha256,targetSha256:target.project.source?.sha256,sections:input.sections,limitations:['区間対応は明示指定。楽曲構成を自動推定していない','図形と文字内容を保持。文字数変更は既存の編集操作で行う','区間端で表示をクリップ。区間内は一定倍率で時間変換']}});
+  return generated(input.name,scene,input.targetProjectId,input.actor,{...getDocuments(id),adaptation:{kind:'sections',sourceProjectId:id,sourceRevision:input.baseRevision,targetProjectId:input.targetProjectId,targetRevision:input.targetRevision,sourceSha256:source.project.source?.sha256,targetSha256:target.project.source?.sha256,sections:input.sections,beatMapping:'区間先頭に最も近い新曲の拍から拍番号を対応。揺れはoffsetSecondsに保持',limitations:['区間対応は明示指定。楽曲構成を自動推定していない','図形と文字内容を保持。文字数変更は既存の編集操作で行う','秒キーは区間ごとに変換。区間をまたぐ補間曲線の厳密な再パラメータ化はしない','反復周期・staggerの拍数は保持するが、不規則な拍ごとの周期変化は未対応']}});
 }
 
 export function generateBaselines(id:string,input:z.infer<typeof BaselineRequest>) {
   const source=current(id,input.baseRevision),target=current(input.targetProjectId,input.targetRevision);
-  const map=(scene:Scene,sourceFrom:number,sourceTo:number,targetFrom:number,targetTo:number,reason:string)=>retimeSections(scene,target.scene,[{sourceFrom,sourceTo,targetFrom,targetTo,elementIds:scene.elements.map(e=>e.id),reason}]);
+  const map=(scene:Scene,sourceFrom:number,sourceTo:number,targetFrom:number,targetTo:number,reason:string)=>retimeSections(scene,target.scene,[{sourceFrom,sourceTo,targetFrom,targetTo,elementIds:scene.elements.map(e=>e.id),reason}],false);
   const beats=(s:Scene)=>[...new Set((s.markers??[]).filter(m=>m.kind==='beat'&&m.t>=0&&m.t<=s.duration).map(m=>m.t))].sort((a,b)=>a-b);
   const a=beats(source.scene),b=beats(target.scene);
   if(a.length<2||b.length<2) throw new HttpError(422,'拍基準の比較版には両方のシーンに2拍以上必要です');

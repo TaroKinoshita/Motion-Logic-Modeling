@@ -19,6 +19,9 @@ try {
   let source=await req('/api/projects',{name:'M3 reference',template:'demo'},201);
   const id=source.project.id,route=`/api/projects/${id}`;
   source.scene.elements.push({id:'hold',type:'rect',width:100,height:100,transform:{x:{keys:[{t:0,v:0},{t:1,v:100},{t:2,v:100},{t:3,v:200}]},y:300}});
+  source.scene.elements.push({...structuredClone(source.scene.elements.at(-1)),id:'holdPartner'});
+  source.scene.tempo={bpm:120,offset:0};
+  source.scene.elements.push({id:'relation',type:'rect',width:20,height:20,transform:{x:{keys:[{t:{beat:0},v:0},{t:{beat:2},v:100}]}}});
   source.scene.markers=Array.from({length:12},(_,i)=>({t:i*.5,kind:'beat',origin:'manual'}));
   source=await req(route+'/scene',{baseRevision:source.project.revision,scene:source.scene});
   const prior=source.project.revision;
@@ -30,6 +33,15 @@ try {
   const rule={id:'r1',hypothesisId:'h1',kind:'hold',elementId:'hold',property:'x',keyIndex:1};
   source=await req(route+'/model',{baseRevision:measured.project.revision,hypotheses:[hypothesis],rules:[rule]});
   await req(route+'/model',{baseRevision:source.project.revision,hypotheses:[{...hypothesis,observationIds:['missing']}],rules:[rule]},422);
+  source=await req(route+'/model',{baseRevision:source.project.revision,hypotheses:[{...hypothesis,id:'h2',status:'proposed'}],rules:[]});
+  const merged=await req(route+'/documents');
+  assert.equal(merged.hypotheses.length,2);
+  assert.equal(merged.motion_rules.rules.length,1);
+  source=await req(route+'/model',{baseRevision:source.project.revision,mode:'replace',hypotheses:[hypothesis],rules:[rule]});
+  const groupRule={id:'group',hypothesisId:'h1',kind:'hold_group',targets:[{elementId:'hold',property:'x',keyIndex:1},{elementId:'holdPartner',property:'x',keyIndex:1}]};
+  source=await req(route+'/model',{baseRevision:source.project.revision,hypotheses:[],rules:[groupRule]});
+  const grouped=await req(route+'/variant',{baseRevision:source.project.revision,ruleId:'group',seconds:.5,name:'Synchronized hold'});
+  for(const id of ['hold','holdPartner']) assert.deepEqual(grouped.scene.elements.find(e=>e.id===id).transform.x.keys.map(k=>k.t),[0,1,1.5,2.5]);
   const before=await req(route+'/documents');
   const variants=[];
   for(const seconds of [0,.5,1.5]) variants.push(await req(route+'/variant',{baseRevision:source.project.revision,ruleId:'r1',seconds,name:`Hold ${seconds}`}));
@@ -55,6 +67,9 @@ try {
   const request={baseRevision:source.project.revision,targetProjectId:target.project.id,targetRevision:target.project.revision,name:'M4 adapted'};
   const adapted=await req(route+'/adapt',{...request,sections:[{sourceFrom:0,sourceTo:3,targetFrom:0,targetTo:5,elementIds:source.scene.elements.filter(e=>e.id!=='burst').map(e=>e.id),reason:'前半に長い尺を配分する'},{sourceFrom:3,sourceTo:6,targetFrom:5,targetTo:8,elementIds:['burst'],reason:'解放を後半に残す'}]});
   assert.equal(adapted.scene.elements.find(e=>e.id==='hold').transform.x.keys[1].t,5/3);
+  const beatKey=adapted.scene.elements.find(e=>e.id==='relation').transform.x.keys[1].t;
+  assert.equal(typeof beatKey,'object');
+  assert.ok(Math.abs(adapted.scene.tempo.offset+beatKey.beat*60/adapted.scene.tempo.bpm+(beatKey.offsetSeconds??0)-1.55)<1e-8);
   assert.equal(adapted.project.source.sha256,target.project.source.sha256);
   const baselines=await req(route+'/adapt-baselines',request);
   assert.equal(baselines.projects.length,3);
