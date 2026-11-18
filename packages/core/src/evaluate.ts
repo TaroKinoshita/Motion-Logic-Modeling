@@ -81,7 +81,8 @@ export function localMatrix(el: SceneElement, t: number, tempo?: Tempo): Mat {
   const r = (sampleTrack(tr.rotation, t, 0, tempo) * Math.PI) / 180;
   const cos = Math.cos(r);
   const sin = Math.sin(r);
-  const a = cos * sx, b = sin * sx, c = -sin * sy, d = cos * sy;
+  const shear=sampleTrack(tr.shearX,t,0,tempo);
+  const a = cos * sx, b = sin * sx, c = cos * shear - sin * sy, d = sin * shear + cos * sy;
   const ax = el.anchorX ?? 0, ay = el.anchorY ?? 0;
   return [a, b, c, d, x - a * ax - c * ay, y - b * ax - d * ay];
 }

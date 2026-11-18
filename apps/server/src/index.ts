@@ -1,10 +1,14 @@
 import { compareSegment } from './compare.ts';
 import { TrackingRequest, trackRegion } from './tracking.ts';
 import { exportBlocking, getBlocking } from './blocking.ts';
+import { createRepresentative, RepresentativeRequest } from './representative.ts';
 import { BlockExportRequest, blockJobStatus, cancelBlockJob, editBlocking, EditBlockingRequest, latestBlockJob, retryBlockJob, SequenceRequest, startBlockExport, startBlockJob } from './block-edit.ts';
 import { MusicRequest, importMusic } from './music.ts';
-import { MeasureRequest, ModelRequest, VariantRequest, AdaptRequest, BaselineRequest, GlyphRequest, measureEvents, saveModel, generateVariant, generateAdaptation, generateBaselines, recordGlyphs } from './modeling.ts';
+import { MeasureRequest, ModelRequest, VariantRequest, AdaptRequest, BaselineRequest, GlyphRequest, measureEvents, saveModel, generateVariant, generateRulePair, generateAdaptation, generateBaselines, recordGlyphs } from './modeling.ts';
 import { detectBeats } from './beats.ts';
+import { applyOrientation, editTiming, TimingRequest } from './timing.ts';
+import { saveStyleStudy, StyleStudyRequest } from './style-study.ts';
+import { generateLyricStudy, LyricGenerationRequest } from './lyric-generation.ts';
 // Motion Logic サーバー。UI（ブラウザ）とMCPアダプターの両方がこのHTTP APIを使う。
 // ローカル利用が前提なので 127.0.0.1 にだけ待ち受ける。
 import fs from 'node:fs';
@@ -82,6 +86,7 @@ app.get('/api/projects/:id/blocking',c=>c.json({design:getBlocking(c.req.param('
 app.post('/api/projects/:id/blocking/export',async c=>c.json(await exportBlocking(c.req.param('id'))));
 app.post('/api/projects/:id/blocking/export-job',async c=>c.json(startBlockExport(c.req.param('id'),parse(BlockExportRequest,await c.req.json())),202));
 app.post('/api/projects/:id/blocking/edit',async c=>c.json(editBlocking(c.req.param('id'),parse(EditBlockingRequest,await c.req.json()))));
+app.post('/api/projects/:id/blocking/representative',async c=>c.json(await createRepresentative(c.req.param('id'),parse(RepresentativeRequest,await c.req.json())),201));
 app.post('/api/projects/:id/blocking/analyze',async c=>c.json(startBlockJob(c.req.param('id'),parse(SequenceRequest,await c.req.json())),202));
 app.get('/api/projects/:id/blocking/jobs/latest',c=>c.json(latestBlockJob(c.req.param('id'))));
 app.get('/api/projects/:id/blocking/jobs/:job',c=>c.json(blockJobStatus(c.req.param('id'),c.req.param('job'))));
@@ -91,9 +96,16 @@ app.get('/api/projects/:id/documents', c => c.json(getDocuments(c.req.param('id'
 app.post('/api/projects/:id/track-region', async c => c.json(await trackRegion(c.req.param('id'), parse(TrackingRequest, await c.req.json()))));
 app.post('/api/projects/:id/music', async c => c.json(await importMusic(c.req.param('id'), parse(MusicRequest, await c.req.json()))));
 app.post('/api/projects/:id/measure-events', async c => c.json(measureEvents(c.req.param('id'), parse(MeasureRequest, await c.req.json()))));
+app.post('/api/projects/:id/blocking/timing', async c => {
+  const body=parse(TimingRequest,await c.req.json()),id=c.req.param('id');
+  return c.json(body.operation==='apply-orientation'?await applyOrientation(id,body):editTiming(id,body));
+});
 app.post('/api/projects/:id/observe-glyphs', async c => c.json(recordGlyphs(c.req.param('id'), parse(GlyphRequest, await c.req.json()))));
 app.post('/api/projects/:id/model', async c => c.json(saveModel(c.req.param('id'), parse(ModelRequest, await c.req.json()))));
+app.post('/api/projects/:id/style-study', async c => c.json(saveStyleStudy(c.req.param('id'), parse(StyleStudyRequest, await c.req.json()))));
+app.post('/api/projects/:id/lyric-study', async c => c.json(generateLyricStudy(c.req.param('id'), parse(LyricGenerationRequest, await c.req.json()))));
 app.post('/api/projects/:id/variant', async c => c.json(generateVariant(c.req.param('id'), parse(VariantRequest, await c.req.json()))));
+app.post('/api/projects/:id/variant-pair', async c => c.json(generateRulePair(c.req.param('id'), parse(VariantRequest, await c.req.json()))));
 app.post('/api/projects/:id/adapt', async c => c.json(generateAdaptation(c.req.param('id'), parse(AdaptRequest, await c.req.json()))));
 app.post('/api/projects/:id/adapt-baselines', async c => c.json(generateBaselines(c.req.param('id'), parse(BaselineRequest, await c.req.json()))));
 

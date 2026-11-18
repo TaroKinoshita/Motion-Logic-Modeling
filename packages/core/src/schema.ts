@@ -38,6 +38,8 @@ export const TransformSchema = z.strictObject({
   scaleY: TrackSchema.optional(),
   /** 度。時計回りが正。 */
   rotation: TrackSchema.optional(),
+  /** Local horizontal shear factor before rotation (pixels of x per pixel of y). */
+  shearX: TrackSchema.optional(),
   /** 0..1。親からは継承しない（AEと同じ扱い）。 */
   opacity: TrackSchema.optional(),
 });
@@ -58,6 +60,12 @@ export const ElementSchema = z.strictObject({
   fill: z.string().optional(),
   /** Closed polygons in 0..4096 local box coordinates; nested polygons create holes. */
   outline: z.array(z.array(z.number()).min(6).refine(points => points.length % 2 === 0)).optional(),
+  vector: z.array(z.discriminatedUnion('op',[
+    z.object({op:z.literal('M'),p:z.tuple([z.number(),z.number()])}),
+    z.object({op:z.literal('L'),p:z.tuple([z.number(),z.number()])}),
+    z.object({op:z.literal('C'),p:z.tuple([z.number(),z.number(),z.number(),z.number(),z.number(),z.number()])}),
+    z.object({op:z.literal('Z')}),
+  ])).optional(),
   stroke: z.string().optional(),
   strokeWidth: z.number().optional(),
   text: z.string().optional(),

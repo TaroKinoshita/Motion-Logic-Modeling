@@ -139,6 +139,10 @@ UIの「拍を推定」、MCPの`detect_beats`、HTTPの`POST /api/projects/:id/
 
 輪郭追跡のPython依存は `workers/track/blocking-requirements.txt`。検証環境はPython 3.11。別の環境を使う場合は `MLM_BLOCKING_PYTHON` を指定する。OCRの重みがない環境でも輪郭を計測できる。 [検証結果と再実行](docs/17_Contour_Blocking_Result.md)
 
+「ブロックの修正」で「同じ文字の断片から代表形を作る」を選び、2〜48コマの範囲と代表のコマ、接触前後の断片を指定する。範囲の終了Fは含まない。固定の輪郭と変形キーが別プロジェクトに保存される。「外観を文字へ置換」で、親の動きを使って別の文字を表示できる。近似には既存の `workers/track` のuv環境を使い、別の実行先は `MLM_TRACK_PYTHON` で指定する。 [実装計画と検証結果](docs/19_Editable_Motion_And_Style_Plan.md)
+
+計測版の工程比較で「全編を固定形状とキーに変換」を実行できる。変換結果は別プロジェクトに保存される。輪郭の特徴が大きく変わる箇所は固定形状を区間ごとに選び、出来事に候補を表示する。輪郭を計測した実素材では `node scripts/verify-lyrics-sequence-model.mjs <元プロジェクトID> <前回の報告JSON> <出力先>` で、Lyricsample1の全編モデルと採点資料を再生成できる。
+
 ## M3・M4の初版（API / MCP）
 
 実素材の計測と再現については [Lyricsample1 の再計測](docs/12_Lyricsample1_Followup.md)。`track-region` は明暗のはっきりした字形用の `method:"silhouette"` を選択可能。`observe-glyphs` で合字の部品・ルビを観察として保存できる。既存の日本語フォントと字間の指定、切替の吸着はインスペクターから行える。
@@ -156,5 +160,9 @@ MCPの `model_project(project_id, operation, input)` で次を実行できる。
 - `documents`：観察・仮説・規則・近似・再構成の文書を取得。これは読取なのでinput不要。
 
 工程比較の「観察・仮説・規則」で、拍との照合、モデルの編集、比較版生成、転用区間の指定と比較基準生成を行える。小節頭・区間は手で修正できる。転用時はシーンと輪郭、出来事、外観の時刻を変換する。実曲への転用の受け入れ試験は残る。
+
+同じ画面で発音区間を手で記録し、確定した出来事を発音・拍・小節頭・オンセットと照合できる。2つの輪郭の中心から画面内の角度を計測できる。`style-study` は作品クレジットと観察のリビジョンを保存し、`variant-pair` は共通素材で元の設定と規則を1件変更した比較版を生成する。MCPの入力形式は `get_guide` を参照。
+
+工程比較では代表形のアフィン近似、回転のキー化、停止・速度・占有率の観察、確認コマの別採点を利用できる。`lyric-study` は歌詞区間と作品比較の規則を指定して、基準版・全規則版・規則を1つずつ外した版を同じ音源で生成する。実素材と合成音源での書き出し再現は `node scripts/verify-lyrics-phases.mjs <輪郭プロジェクトID> <出力先>`。 [比較方法と結果](docs/19_Editable_Motion_And_Style_Plan.md)
 
 統合検証：`node scripts/verify-modeling.mjs C:/Users/kinos/mlm_samples/kinetic_sample.mp4`。隔離した `data/modeling-validation/` にテスト用プロジェクトとreport.jsonを保存する。[根拠・検証・制限](docs/10_M3_M4_Implementation.md)。

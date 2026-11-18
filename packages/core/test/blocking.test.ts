@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { blockingFrame, emptyScene, evaluateScene, validateBlocking } from '../src/index.ts';
+import { blockingFrame, emptyScene, evaluateScene, localMatrix, validateBlocking } from '../src/index.ts';
 import type { Blocking, Scene } from '../src/index.ts';
 
 const scene: Scene = {...emptyScene(),duration:2,elements:[
@@ -16,6 +16,11 @@ const design: Blocking = {
   events:[],
   appearance:[{blockId:'parent',childIds:['glyph']}],
 };
+
+test('rotation, nonuniform scale and horizontal shear compose into the stored affine transform',()=>{
+  const m=localMatrix({id:'sprite',type:'group',transform:{x:200,y:100,scaleX:2,scaleY:3,shearX:.4,rotation:90}},0);
+  for(const [i,expected] of [0,2,-3,.4,200,100].entries()) assert.ok(Math.abs(m[i]-expected)<1e-9);
+});
 
 test('the placeholder and glyph share translation while extent edits leave the glyph scale unchanged',()=>{
   validateBlocking(scene,design);

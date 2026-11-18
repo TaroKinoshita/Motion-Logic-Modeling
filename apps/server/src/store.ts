@@ -60,7 +60,7 @@ function readJson<T>(file: string): T {
   return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
 }
 
-export const DOCUMENT_NAMES = ['observations', 'hypotheses', 'motion_rules', 'simplification', 'adaptation', 'blocks', 'events', 'appearance'] as const;
+export const DOCUMENT_NAMES = ['observations', 'hypotheses', 'motion_rules', 'simplification', 'adaptation', 'blocks', 'events', 'appearance', 'style_study'] as const;
 export type ProjectDocuments = Partial<Record<typeof DOCUMENT_NAMES[number], unknown>>;
 type RevisionSnapshot=HistoryEntry & {scene:Scene;documents?:ProjectDocuments;media?:{source?:ProjectMeta['source'];audioAnalysis?:ProjectMeta['audioAnalysis']}};
 const revisionFile=(dir:string,revision:number)=>path.join(dir,'history',`r${String(revision).padStart(6,'0')}.json`);
@@ -73,6 +73,20 @@ export function getDocuments(id: string): ProjectDocuments {
   const dir=projectDir(id);
   const project=readProjectMeta(dir,id);
   return readRevision(revisionFile(dir,project.revision)).documents??{};
+}
+
+export function getEvidenceSnapshot(id:string,revision:number) {
+  const {project,snapshot}=getRevisionSnapshot(id,revision);
+  return {title:project.name,sourceSha256:snapshot.media?.source?.sha256,observations:snapshot.documents?.observations as Record<string,unknown>??{}};
+}
+
+export function getRevisionSnapshot(id:string,revision:number) {
+  const dir=projectDir(id);
+  const project=readProjectMeta(dir,id);
+  const file=revisionFile(dir,revision);
+  if(revision>project.revision||(!fs.existsSync(file)&&!fs.existsSync(`${file}.gz`))) throw new HttpError(422,`参照するリビジョンがありません: ${id} r${revision}`);
+  const snapshot=readRevision(file);
+  return {project,snapshot};
 }
 
 /** スキーマ検査と整合性検査を通ったシーンだけを返す。 */

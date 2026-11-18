@@ -13,8 +13,10 @@ process.env.MLM_DATA_DIR=fs.mkdtempSync(path.resolve('data','block-workflow-'));
 const {createProject,commit,getDocuments,getProject,listHistory,projectDir,revertTo}=await import('../apps/server/src/store.ts');
 const {getBlocking,exportBlocking}=await import('../apps/server/src/blocking.ts');
 const {editBlocking,startBlockJob,blockJobStatus,cancelBlockJob,retryBlockJob,startBlockExport}=await import('../apps/server/src/block-edit.ts');
-const {saveModel,generateVariant,generateAdaptation,generateBaselines}=await import('../apps/server/src/modeling.ts');
+const {saveModel,generateVariant,generateRulePair,generateAdaptation,generateBaselines}=await import('../apps/server/src/modeling.ts');
 const {importMusic}=await import('../apps/server/src/music.ts');
+const {editTiming,TimingRequest}=await import('../apps/server/src/timing.ts');
+const {saveStyleStudy,StyleStudyRequest}=await import('../apps/server/src/style-study.ts');
 const read=file=>JSON.parse(fs.readFileSync(path.join(output,`${file}.json`),'utf8'));
 const reference=createProject('Workflow fixture',read('scene'),'test');
 const id=reference.project.id;
@@ -102,6 +104,13 @@ for(const delta of [-1,1]) {
   assert.ok(Math.abs(output.contours[0].t-result.t)<1e-8);
 }
 assert.equal(getProject(id).project.revision,saved.project.revision);
+const pair=generateRulePair(id,{baseRevision:saved.project.revision,actor:'test',ruleId:'shift',seconds:0,mergeOffsetSeconds:1/24,name:'Paired timing'});
+assert.deepEqual(pair.variants.map(row=>row.label),['A','B']);
+for (const item of pair.variants) {
+  const state=getBlocking(item.project.id);
+  assert.equal(state.project.source.sha256,probeSource.sha256);
+  assert.equal(Math.round(state.design.events.find(row=>row.id===event.id).t*24),item.label===pair.reveal.withRule?82:81);
+}
 
 const audio=path.join(process.env.MLM_DATA_DIR,'synthetic.wav');
 execFileSync('ffmpeg',['-v','error','-f','lavfi','-i','sine=frequency=440:sample_rate=48000:duration=8',audio]);
@@ -143,7 +152,49 @@ assert.equal(cancelledOutput.state,'cancelled');
 const exportedSource=await wait(retryBlockJob(id,cancelledExport.id));
 assert.equal(exportedSource.state,'done',exportedSource.error);
 assert.equal(exportedSource.output.frameCount,183);
+// Deliberately synthetic audio references in the temporary project test both outcomes.
+const audioFixture=commit(id,{baseRevision:saved.project.revision,actor:'test',note:'Synthetic timing test fixture',
+  scene:scene=>({...scene,markers:[{t:event.t+.035,kind:'beat',origin:'manual'}, {t:event.t+.08,kind:'downbeat',origin:'estimated'}]}),
+  meta:project=>{project.audioAnalysis={sourceSha256:probeSource.sha256,onsets:[event.t-.08],sourceOffsetSeconds:.01};},
+});
+const timing=(baseRevision,body)=>editTiming(id,TimingRequest.parse({baseRevision,actor:'test',...body}));
+const orientation=timing(audioFixture.project.revision,{operation:'orientation',from:150,to:160,label:'何にも',
+  anchors:[['track:lyrics:162','track:lyrics:166'],['track:lyrics:163','track:lyrics:167']]});
+assert.equal(orientation.observation.samples.length,10);
+assert.deepEqual(orientation.observation.missingFrames,[]);
+assert.ok(orientation.observation.samples.at(-1).deltaDegrees>25);
+const noLyrics=timing(orientation.project.revision,{operation:'measure'});
+assert.equal(noLyrics.measurements.find(row=>row.event.id===event.id).assessment,'insufficient');
+const lyric={operation:'lyric',text:'Synthetic transcription',from:event.t-.02,to:event.t+.15,uncertaintySeconds:.01};
+const written=timing(noLyrics.project.revision,lyric);
+const measured=timing(written.project.revision,{operation:'measure'});
+const measuredEvent=measured.measurements.find(row=>row.event.id===event.id);
+assert.equal(measuredEvent.assessment,'indistinguishable');
+assert.equal(measuredEvent.matches.lyric[0].observationId,written.observation.id);
+assert.ok(Math.abs(measuredEvent.matches.beat[0].offsetSeconds+.035)<1e-9);
+assert.ok(Math.abs(measuredEvent.matches.onset[0].offsetSeconds-.07)<1e-9);
+const correction=timing(measured.project.revision,{...lyric,from:event.t-.3,replaces:written.observation.id});
+const remeasured=timing(correction.project.revision,{operation:'measure'});
+assert.equal(remeasured.measurements.find(row=>row.event.id===event.id).assessment,'beat-nearby');
+assert.ok(getDocuments(id).observations[written.observation.id]);
+assert.throws(()=>timing(saved.project.revision,lyric),error=>error.status===409);
+assert.throws(()=>timing(remeasured.project.revision,{...lyric,replaces:written.observation.id}),error=>error.status===422);
+const observationRef={projectId:id,revision:orientation.project.revision,observationId:orientation.observation.id};
+const author={projectId:id,revision:orientation.project.revision,group:'author',credit:'Fixture author',creditBasis:'Test metadata'};
+const control={projectId:target.project.id,revision:target.project.revision,group:'control',credit:'Fixture control',creditBasis:'Generated sine'};
+const compare={baseRevision:remeasured.project.revision,works:[author,control],claims:[{id:'turn',axis:'motion',label:'Angle',condition:'Selected segment',evidence:[observationRef]}]};
+const style=(input)=>saveStyleStudy(id,StyleStudyRequest.parse(input));
+assert.throws(()=>style({...compare,works:[author,{...control,projectId:pair.variants[0].project.id,revision:pair.variants[0].project.revision}]}),error=>error.status===422);
+assert.throws(()=>style({...compare,claims:[{...compare.claims[0],evidence:[{...observationRef,observationId:'missing'}]}]}),error=>error.status===422);
+const study=style(compare);
+assert.equal(study.study.claims[0].summary.author.works,1);
+assert.equal(study.study.claims[0].summary.author.distributions['angle.changeDegrees'].n,1);
+assert.equal(study.study.claims[0].summary.control.caseCount,0);
+assert.throws(()=>style(compare),error=>error.status===409);
 console.log(JSON.stringify({data:process.env.MLM_DATA_DIR,checks:['frame-local box edit','stale revision rejection','cancel and retry',
   'partial remeasurement','split and compressed history restore','camera parenting preserves screen geometry','group and ungroup preserve geometry',
-  'confirmed merge -1F/+1F variants','source preserved','synthetic M4 retiming and MP4','four M4 baselines with separate local beat timing','MP4 export cancel and retry'],
+  'confirmed merge -1F/+1F variants','source preserved','synthetic M4 retiming and MP4','four M4 baselines with separate local beat timing','MP4 export cancel and retry',
+  'angle observations from two visible contours','lyric revisions, absent lyrics, ambiguous timing, signed beat and onset offsets',
+  'same media in stable A/B rule comparison','historical evidence references, duplicate-source rejection and corpus summaries'],
+  rotation:orientation.observation.samples.map(({frame,deltaDegrees,distancePx})=>({frame,deltaDegrees,distancePx})),
   adapted:adapted.project.id,frames:exported.frameCount},null,2));

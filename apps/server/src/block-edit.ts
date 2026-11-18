@@ -1,17 +1,22 @@
 import { randomUUID } from 'node:crypto';
+import { createCanvas } from '@napi-rs/canvas';
 import { z } from 'zod';
 import { isActive, resolveTime, sampleTrack, validateBlocking } from '@mlm/core';
 import type { Blocking, Scene, Track } from '@mlm/core';
 import { analyzeSequence, sequenceDesign } from './block-sequence.ts';
 import { exportBlocking, getBlocking } from './blocking.ts';
-import { commit, getDocuments, getProject, HttpError } from './store.ts';
+import { commit, createProject, getDocuments, getProject, HttpError, trashProject } from './store.ts';
+import {copyFile} from 'node:fs/promises';
+import {sourcePath} from './media.ts';
+import {spriteModel} from './sprite-model.ts';
+import {createSequenceModel} from './sequence-model.ts';
 
 const revision=z.number().int().positive();
 const frame=z.number().int().nonnegative();
 const head={baseRevision:revision,actor:z.string().min(1).max(40).default('human')};
 export const SequenceRequest=z.strictObject({...head,from:frame.optional(),to:frame.optional(),
   region:z.tuple([frame,frame,revision,revision]).optional(),cuts:z.array(frame).max(300).optional(),ocrFrames:z.array(frame).max(100).optional(),
-  blockId:z.string().optional(),
+  blockId:z.string().optional(),engine:z.enum(['sprite','sequence-model']).optional(),
 });
 export const BlockExportRequest=z.strictObject(head);
 export const EditBlockingRequest=z.strictObject({...head,edit:z.discriminatedUnion('kind',[
@@ -21,7 +26,7 @@ export const EditBlockingRequest=z.strictObject({...head,edit:z.discriminatedUni
   z.strictObject({kind:z.literal('box'),blockId:z.string(),frame,cx:z.number(),cy:z.number(),
     width:z.number().positive(),height:z.number().positive(),rotation:z.number().optional()}),
   z.strictObject({kind:z.literal('split'),blockId:z.string(),frame}),
-  z.strictObject({kind:z.literal('text'),blockId:z.string(),text:z.string().min(1).max(120)}),
+  z.strictObject({kind:z.literal('text'),blockId:z.string(),text:z.string().trim().min(1).max(120),frame:frame.optional()}),
   z.strictObject({kind:z.literal('camera'),from:frame,to:frame}),
   z.strictObject({kind:z.literal('group'),blockIds:z.array(z.string()).min(2).max(20),label:z.string().min(1).max(120)}),
   z.strictObject({kind:z.literal('ungroup'),blockId:z.string()}),
@@ -53,8 +58,9 @@ export function editBlocking(id:string,input:z.infer<typeof EditBlockingRequest>
   if(!current) throw new HttpError(404,'先に工程を解析してください');
   const design=structuredClone(current),edit=input.edit;
   const added:Record<string,unknown>={};
-  const t='frame' in edit?edit.frame/scene.fps:0;
-  if('frame' in edit&&(t<design.blocks.from||t>=design.blocks.to)) throw new HttpError(422,'比較範囲内のフレームを指定してください');
+  const hasFrame='frame' in edit&&edit.frame!==undefined;
+  const t=hasFrame?edit.frame!/scene.fps:0;
+  if(hasFrame&&(t<design.blocks.from||t>=design.blocks.to)) throw new HttpError(422,'比較範囲内のフレームを指定してください');
   const block='blockId' in edit&&edit.blockId?design.blocks.items.find(entry=>entry.id===edit.blockId):undefined;
   if('blockId' in edit&&edit.blockId&&!block) throw new HttpError(404,'ブロックがありません');
   if(edit.kind==='group') {
@@ -133,17 +139,37 @@ export function editBlocking(id:string,input:z.infer<typeof EditBlockingRequest>
         if(event.t>t) event.inputs=event.inputs.map(id=>id===block.id?newId:id);
       }
     } else if(edit.kind==='text') {
-      const child=appearance&&scene.elements.find(el=>el.id===appearance.childIds[0]);
+      const available=appearance&&scene.elements.filter(el=>appearance.childIds.includes(el.id));
+      const shown=available?.length===1?available:available?.filter(el=>hasFrame&&isActive(el,scene,t));
+      if(available&&available.length>1&&shown?.length!==1) throw new HttpError(422,'外観が一つ表示されるコマを指定してください');
+      const child=shown?.[0];
       if(!appearance||!child) throw new HttpError(422,'外観を割り当てる子要素がありません');
       const start=resolveTime(group.inPoint??0,scene.tempo);
       const ink=appearance.contours?.[0]?.luma;
-      Object.assign(child,{type:'text',text:edit.text,fontFamily:'MLM Yu Gothic',fontWeight:700,fill:ink!==undefined&&ink>=128?'#eeeeee':'#242424',
-        fontSize:Math.max(10,sampleTrack(block.extent.height,start,60,scene.tempo)),outline:undefined});
+      const fixed=!appearance.contours?.length&&child.width!==undefined&&child.height!==undefined;
+      const fill=fixed?child.fill:ink!==undefined&&ink>=128?'#eeeeee':'#242424';
+      const fontSize=fixed?100:Math.max(10,sampleTrack(block.extent.height,start,60,scene.tempo));
+      if(fixed) {
+        const ctx=createCanvas(1,1).getContext('2d');
+        ctx.font=`700 ${fontSize}px "MLM Yu Gothic"`;
+        ctx.textAlign='center';
+        ctx.textBaseline='middle';
+        const {actualBoundingBoxLeft:left,actualBoundingBoxRight:right,actualBoundingBoxAscent:top,actualBoundingBoxDescent:bottom}=ctx.measureText(edit.text);
+        if(!(left+right>0&&top+bottom>0)) throw new HttpError(422,'描画できる文字を指定してください');
+        const scaleX=child.width!/(left+right),scaleY=child.height!/(top+bottom);
+        // Keep the nominal center across successive substitutions.
+        const x=sampleTrack(block.extent.cx,start,0,scene.tempo);
+        const y=sampleTrack(block.extent.cy,start,0,scene.tempo);
+        child.transform={opacity:child.transform?.opacity,x:x+(left-right)*scaleX/2,y:y+(top-bottom)*scaleY/2,scaleX,scaleY};
+      }
+      Object.assign(child,{type:'text',text:edit.text,fontFamily:'MLM Yu Gothic',fontWeight:700,fill,
+        fontSize,outline:undefined,vector:undefined});
       appearance.contours=undefined;
-      block.label=edit.text;
+      if(appearance.childIds.length===1) block.label=edit.text;
+      else child.name=edit.text;
       const evidence= `reading:${randomUUID()}`;
-      added[evidence]={id:evidence,kind:'glyph-reading',origin:'manual',blockId:block.id,text:edit.text,sourceSha256:project.source?.sha256,
-        sourceRevision:project.revision,previousObservations:[...block.observationIds]};
+      added[evidence]={id:evidence,kind:fixed?'appearance-substitution':'glyph-reading',origin:'manual',blockId:block.id,text:edit.text,sourceSha256:project.source?.sha256,
+        sourceRevision:project.revision,frame:edit.frame,childId:child.id,previousObservations:[...block.observationIds]};
       block.observationIds.push(evidence);
     }
   }
@@ -237,6 +263,7 @@ type Job={
   operation:'measure'|'export';
   revision?:number;error?:string;progress?:number;updatedAt:number;controller:AbortController;input:SequenceInput;
   output?:Awaited<ReturnType<typeof exportBlocking>>;
+  resultProjectId?:string;
 };
 const jobs=new Map<string,Job>();
 const jobStatus=({controller:_,input:__,...status}:Job)=>status;
@@ -264,6 +291,34 @@ export function retryBlockJob(projectId:string,id:string) {
 export function startBlockJob(id:string,input:SequenceInput) {
   const {project,scene,design}=getBlocking(id);
   checkRevision(project.revision,input.baseRevision);
+  if(input.engine==='sequence-model') {
+    if(!design?.appearance.some(binding=>binding.contours?.length)) throw new HttpError(422,'先に輪郭を計測してください');
+    return schedule(id,input,'measure',async job=>{
+      job.state='measuring';
+      const saved=await createSequenceModel(id,input,job.controller.signal);
+      job.revision=saved.project.revision;
+      job.resultProjectId=saved.project.id;
+    });
+  }
+  if(input.engine==='sprite') {
+    const {from,to,region}=input;
+    if(from===undefined||to===undefined||!region) throw new HttpError(422,'Fast Spriteの区間と開始フレームの領域を指定してください');
+    return schedule(id,input,'measure',async job=>{
+      job.state='measuring';
+      const next=await spriteModel(project,scene,{from,to,region},job.controller.signal);
+      job.controller.signal.throwIfAborted();
+      checkRevision(getProject(id).project.revision,input.baseRevision);
+      job.state='saving';
+      const created=createProject(`${project.name.slice(0,75)} · Fast Sprite`,next.scene,input.actor);
+      try {
+        await copyFile(sourcePath(project),sourcePath({...created.project,source:project.source}));
+        const saved=commit(created.project.id,{baseRevision:created.project.revision,actor:input.actor,note:'Fast SpriteとVTracerの代表形・変形を保存',
+          meta:meta=>{meta.source=project.source;meta.audioAnalysis=project.audioAnalysis;},documents:()=>({...next.design,observations:next.observations})});
+        job.revision=saved.project.revision;
+        job.resultProjectId=saved.project.id;
+      } catch(error) {trashProject(created.project.id,input.actor);throw error;}
+    });
+  }
   if(design&&!input.blockId) throw new HttpError(409,'工程がある場合は再計測するブロックを指定してください');
   if(input.blockId&&(!design?.blocks.items.some(item=>item.id===input.blockId)||!input.region)) throw new HttpError(422,'対象ブロックと計測範囲が必要です');
   return schedule(id,input,'measure',async job=>{
@@ -296,6 +351,7 @@ function schedule(id:string,input:SequenceInput,operation:Job['operation'],work:
   for(const [key,job] of jobs) {
     if(Date.now()-job.updatedAt>3_600_000&&!active(job)) jobs.delete(key);
     if(job.projectId===id&&active(job)) throw new HttpError(409,'同じプロジェクトで解析または書き出しを実行中です');
+    if(input.engine==='sprite'&&job.input.engine==='sprite'&&active(job)) throw new HttpError(409,'GPUで別のFast Sprite処理を実行中です');
   }
   const job:Job={id:randomUUID(),projectId:id,state:'queued',operation,updatedAt:Date.now(),controller:new AbortController(),input};
   jobs.set(job.id,job);

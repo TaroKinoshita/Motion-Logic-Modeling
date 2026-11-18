@@ -20,7 +20,7 @@ export const BlocksSchema = z.strictObject({
   })).min(1),
 });
 export const EventsSchema = z.array(z.strictObject({
-  id,kind:z.enum(['appear','contact','merge','split','replace','hold','invert','cut']),
+  id,kind:z.enum(['appear','contact','merge','split','replace','hold','invert','cut','rotate','shape']),
   t:z.number().nonnegative(),until:z.number().nonnegative().optional(),label:z.string(),
   beatRelative:z.boolean().optional(),
   inputs:z.array(id),outputs:z.array(id),observationIds:z.array(id),status:z.enum(['proposed','confirmed','rejected']),

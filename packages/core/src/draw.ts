@@ -44,7 +44,15 @@ export function drawFrame(ctx: CanvasRenderingContext2D, scene: Scene, t: number
       }
     } else {
       ctx.beginPath();
-      if (el.outline) {
+      if(el.vector) {
+        const x=(v:number)=>(v-.5)*w,y=(v:number)=>(v-.5)*h;
+        for(const command of el.vector) {
+          if(command.op==='Z') ctx.closePath();
+          else if(command.op==='M') ctx.moveTo(x(command.p[0]),y(command.p[1]));
+          else if(command.op==='L') ctx.lineTo(x(command.p[0]),y(command.p[1]));
+          else ctx.bezierCurveTo(x(command.p[0]),y(command.p[1]),x(command.p[2]),y(command.p[3]),x(command.p[4]),y(command.p[5]));
+        }
+      } else if (el.outline) {
         for (const polygon of el.outline) {
           ctx.moveTo((polygon[0]/4096-.5)*w, (polygon[1]/4096-.5)*h);
           for (let i = 2; i < polygon.length; i += 2) ctx.lineTo((polygon[i]/4096-.5)*w, (polygon[i+1]/4096-.5)*h);
@@ -57,7 +65,7 @@ export function drawFrame(ctx: CanvasRenderingContext2D, scene: Scene, t: number
       } else {
         ctx.rect(-w / 2, -h / 2, w, h);
       }
-      if (el.fill !== 'none') ctx.fill(el.outline?'evenodd':'nonzero');
+      if (el.fill !== 'none') ctx.fill(el.outline||el.vector?'evenodd':'nonzero');
       if (el.stroke) {
         ctx.strokeStyle = el.stroke;
         ctx.lineWidth = el.strokeWidth ?? 1;

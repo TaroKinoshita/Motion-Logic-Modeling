@@ -2,12 +2,14 @@
 import numpy as np
 
 
-def fit_eased_track(samples):
-    tolerances = dict(x=2.0, y=2.0, scale=.01, widthScale=.01, rotation=.5)
+def fit_eased_track(samples, tolerances=None, *, allow_cubic=True, pinned_times=()):
+    if tolerances is None:
+        tolerances = dict(x=2.0, y=2.0, scale=.01, widthScale=.01, rotation=.5)
     times = np.array([row['t'] for row in samples])
     if not len(times) or np.any(np.diff(times) <= 0):
         raise ValueError('Expected ordered motion samples')
     tracks, errors = {}, {}
+    boundaries = set(pinned_times)
     for field, tolerance in tolerances.items():
         values = np.array([row[field] for row in samples])
         n = len(values)
@@ -15,13 +17,15 @@ def fit_eased_track(samples):
         links = [None]*n
         for right in range(1, n):
             for left in range(right):
+                if any(times[left] < t < times[right] for t in boundaries):
+                    continue
                 segment = values[left:right+1]
                 u = (times[left:right+1]-times[left])/(times[right]-times[left])
                 delta = segment[-1]-segment[0]
                 linear = segment[0]+delta*u
                 error = float(np.max(np.abs(segment-linear)))
                 easing = 'linear'
-                if error > tolerance and len(segment) >= 5 and abs(delta) > tolerance:
+                if allow_cubic and error > tolerance and len(segment) >= 5 and abs(delta) > tolerance:
                     basis = np.column_stack((3*u*(1-u)**2, 3*u*u*(1-u)))
                     controls = np.linalg.lstsq(basis, (segment-segment[0])/delta-u**3, rcond=None)[0]
                     # Keep the fit monotone. Overshoot needs more evidence than sparse video frames.

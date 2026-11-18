@@ -121,15 +121,18 @@ function applyGlyphRule(scene:Scene,docs:ProjectDocuments,rule:Extract<z.infer<t
 }
 function generated(name:string,scene:Scene,mediaId:string,actor:string,documents:ProjectDocuments) {
   checkScene(scene);
-  const source=getProject(mediaId).project.source;
-  const media=source?sourcePath(getProject(mediaId).project):undefined;
+  const {project:reference}=getProject(mediaId);
+  const source=reference.source;
+  const media=source?sourcePath(reference):undefined;
   if(media && !fs.existsSync(media)) throw new HttpError(422,'入力メディアがありません');
   const created=createProject(name,scene,actor);
   try {
     if(source && media) fs.copyFileSync(media,path.join(projectDir(created.project.id),'media',source.fileName));
-    return commit(created.project.id,{baseRevision:created.project.revision,actor,note:'生成条件と入力の出典を保存',meta:p=>{if(source)p.source=structuredClone(source);},documents:()=>documents});
+    return commit(created.project.id,{baseRevision:created.project.revision,actor,note:'生成条件と入力の出典を保存',
+      meta:p=>{p.source=source;p.audioAnalysis=reference.audioAnalysis;},documents:()=>documents});
   } catch(err) {trashProject(created.project.id,actor);throw err;}
 }
+export { generated as saveGeneratedProject };
 export function generateVariant(id:string,input:z.infer<typeof VariantRequest>) {
   const {scene}=current(id,input.baseRevision),docs=getDocuments(id);
   const saved=z.object({rules:z.array(Rule),sceneSha256:z.string()}).safeParse(docs.motion_rules);
@@ -167,6 +170,20 @@ export function generateVariant(id:string,input:z.infer<typeof VariantRequest>) 
     }
   } catch(err) {throw new HttpError(422,String(err));}
   return generated(input.name,next,id,input.actor,{...docs,...derived,adaptation:{kind:'variant',sourceProjectId:id,sourceRevision:input.baseRevision,rule,seconds:input.seconds,mergeOffsetSeconds:input.mergeOffsetSeconds,order:input.order,limitations:['指定した規則のパラメータだけを変更。演出の優劣は未判定']}});
+}
+
+export function generateRulePair(id:string,input:z.infer<typeof VariantRequest>) {
+  const {scene}=current(id,input.baseRevision);
+  const draft=JSON.stringify([id,input.baseRevision,input.ruleId,input.seconds,input.mergeOffsetSeconds,input.order]);
+  const [withRule,withoutRule]=createHash('sha256').update(draft).digest()[0]%2===0?['A','B']:['B','A'];
+  const applied=generateVariant(id,{...input,name:`${input.name.slice(0,98)} ${withRule}`});
+  try {
+    const plain=generated(`${input.name.slice(0,98)} ${withoutRule}`,scene,id,input.actor,{...getDocuments(id),adaptation:{
+      kind:'rule-pair-control',sourceProjectId:id,sourceRevision:input.baseRevision,omittedAdjustmentRuleId:input.ruleId,
+    }});
+    return {variants:[{label:withRule,project:applied.project},{label:withoutRule,project:plain.project}].sort((a,b)=>a.label.localeCompare(b.label)),
+      reveal:{withRule,withoutRule,ruleId:input.ruleId},sourceProjectId:id,sourceRevision:input.baseRevision};
+  } catch(error) {trashProject(applied.project.id,input.actor);throw error;}
 }
 export function generateAdaptation(id:string,input:z.infer<typeof AdaptRequest>) {
   const source=current(id,input.baseRevision),target=current(input.targetProjectId,input.targetRevision);

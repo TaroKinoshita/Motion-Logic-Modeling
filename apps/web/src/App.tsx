@@ -62,7 +62,11 @@ export function App() {
       const value=await response.json();
       if(!response.ok) throw new Error(value.error??'工程比較を読み込めません');
       setBlocking(value.design?{id,design:value.design}:null);
-      if(value.design&&new URLSearchParams(location.search).get('compare')==='1') setShowBlocking(true);
+      if(value.design&&new URLSearchParams(location.search).get('compare')==='1') {
+        const {from,to}=value.design.blocks;
+        setTime(current=>current<from||current>=to?from:current);
+        setShowBlocking(true);
+      }
     }).catch(error=>{if(!controller.signal.aborted) {setBlocking(null);fail(error);}});
     return ()=>controller.abort();
   },[id,revision,projectId,fail]);
@@ -82,12 +86,13 @@ export function App() {
         setBlockJob(job);
         if(job.state==='done') {
           if(job.operation==='export') setExported(job.output??null);
+          else if(job.resultProjectId) reloadList();
           else {setShowBlocking(true);reload(id);}
         }
       }).catch(error=>{setBlockJob(null);fail(error);});
     },350);
     return ()=>window.clearTimeout(timer);
-  },[id,blockJob,reload,fail]);
+  },[id,blockJob,reload,reloadList,fail]);
 
   useEffect(() => void reloadList(), [reloadList]);
 
@@ -376,6 +381,9 @@ export function App() {
         {data && <button onClick={deleteProject}>ごみ箱へ</button>}
         <span className="spacer" />
         {design && <button aria-pressed={showBlocking} onClick={compareStages}>{showBlocking?'シーン編集へ戻る':'工程比較'}</button>}
+        {id&&revision!==undefined&&activeBlocking?.appearance.some(item=>item.contours?.length)&&<button disabled={!!busyJob(blockJob)} onClick={()=>{
+          void api.analyzeBlocking(id,revision,{engine:'sequence-model'}).then(setBlockJob).catch(fail);
+        }}>全編を固定形状とキーに変換</button>}
         {id&&revision&&source&&!design&&<button disabled={!!busyJob(blockJob)} onClick={()=>{
           const cuts=scene?.markers?.filter(marker=>marker.kind==='cut').map(marker=>Math.round(marker.t*scene.fps));
           const frames=Math.floor(source.duration*source.fps);
@@ -415,7 +423,7 @@ export function App() {
               videoUrl={`/api/projects/${data.project.id}/media/source?v=${source.sha256.slice(0, 8)}`} onSeek={seek}>
               <BlockingTools key={data.project.id} design={activeBlocking} scene={shown} time={time} id={data.project.id}
                 revision={data.project.revision} job={blockJob} onJob={setBlockJob} onRefresh={()=>reload(data.project.id)} onError={fail}
-                projects={projects} audio={data.project.audioAnalysis}/>
+                projects={projects} audio={data.project.audioAnalysis} hasAudio={source.hasAudio} onSeek={seek}/>
             </BlockingStage> : <Stage
               scene={design?blockingFrame(shown,design,Math.floor(time*fps+1e-7)/fps,'final'):shown}
               baseScene={scene}

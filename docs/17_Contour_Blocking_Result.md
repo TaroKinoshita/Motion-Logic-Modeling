@@ -30,7 +30,7 @@
 ## モデルと残る検証
 
 - OpenCVで全編の輪郭を計測。PP-OCRv5 Mobile ONNXのCPU推論で特定コマの読み候補を保存した。字幕の細かい粒度や接触時の読みは確認が必要。モデルと依存の版は固定した。
-- SAM 3.1のキャッシュに重み3.50GBを確認した。記録にある `vrecon` のコード・仮想環境は読み取り権限を広げて確認しても見つからなかった。動作したシステム側のPyTorchは2.5.1+cu121で、現行公式手順の要件より古い。Lyricsample1の輪郭抽出はOpenCVで改善した。SAMの速度・精度・VRAMは未実測。 [Metaの公式要件](https://github.com/facebookresearch/sam3#installation)
+- SAM 3.1のキャッシュに重み3.50GBを確認した。ユーザーは端末上の `vrecon` のコードと環境の実在を確認済み。こちらの実行セッションから同じパスを読み取れず、専用Pythonでの推論は未確認。システム側で確認したPyTorch 2.5.1+cu121は別環境。SAMの速度・精度・VRAMは未実測。 [端末上の場所と導入判断](18_Vectorization_Tools.md)・[Metaの公式要件](https://github.com/facebookresearch/sam3#installation)
 - 小節頭・楽曲区間は手動編集に対応し、同じlibrosa環境で4拍子仮定の小節頭と音の変化点の候補を作れる。Lyricsample1では小節頭候補4件、20拍未満のため変化点は出力対象外。人が聴き取った正解との照合と、All-In-One系による楽曲区間ラベル推定は未検証。背景が複雑な素材での分解器比較、別の実曲での受け入れ試験、M5は残る。
 
 ## 再実行

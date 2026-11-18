@@ -20,6 +20,7 @@ export interface BlockJob {
   error?:string;
   progress?:number;
   output?:ExportResult;
+  resultProjectId?:string;
 }
 
 export class ApiError extends Error {
@@ -72,8 +73,20 @@ export const api = {
   retryBlocking: (id:string,job:string)=>post<BlockJob>(`/api/projects/${id}/blocking/jobs/${job}/retry`,{}),
   editBlocking: (id:string,baseRevision:number,edit:Record<string,unknown>)=>
     post<ProjectData & {design:Blocking}>(`/api/projects/${id}/blocking/edit`,{baseRevision,edit}),
-  documents: (id:string)=>request<{observations?:Record<string,unknown>;hypotheses?:unknown;motion_rules?:unknown;adaptation?:unknown}>(`/api/projects/${id}/documents`),
+  representative: (id:string,baseRevision:number,body:{label:string;fragmentIds:string[];from:number;to:number;shapeFrame:number;geometry?:'affine'})=>
+    post<ProjectData>(`/api/projects/${id}/blocking/representative`,{...body,baseRevision}),
+  editTiming: (id:string,baseRevision:number,body:({operation:'lyric';text:string;reading:string;from:number;to:number;uncertaintySeconds:number;replaces?:string}|{operation:'measure'}|
+    {operation:'orientation';label:string;from:number;to:number;anchors:[string[],string[]]}|
+    {operation:'motion';blockId:string;from:number;to:number;stationaryPx?:number}|
+    {operation:'checkpoint';blockId:string;frame:number;box:[number,number,number,number]|null;note?:string}|
+    {operation:'apply-orientation';observationId:string;shapeFrame:number;partIds:string[]}))=>
+    post<ProjectData>(`/api/projects/${id}/blocking/timing`,{...body,baseRevision}),
+  documents: (id:string)=>request<{observations?:Record<string,unknown>;hypotheses?:unknown;motion_rules?:unknown;adaptation?:unknown;
+    style_study?:{works:Record<string,unknown>[];claims:Record<string,unknown>[]}}>(`/api/projects/${id}/documents`),
   runModel: (id:string,operation:'measure-events'|'observe-glyphs'|'model'|'variant'|'music'|'adapt'|'adapt-baselines',body:unknown)=>
     post<ProjectData>(`/api/projects/${id}/${operation}`,body),
   generateBaselines: (id:string,body:unknown)=>post<{projects:ProjectData[]}>(`/api/projects/${id}/adapt-baselines`,body),
+  saveStyleStudy: (id:string,body:unknown)=>post<ProjectData>(`/api/projects/${id}/style-study`,body),
+  generateRulePair: (id:string,body:unknown)=>post<{variants:{label:string;project:ProjectMeta}[];reveal:{withRule:string;withoutRule:string}}>(`/api/projects/${id}/variant-pair`,body),
+  generateLyricStudy: (id:string,body:unknown)=>post<{variants:{label:string;project:ProjectMeta}[];reveal:Record<string,string>}>(`/api/projects/${id}/lyric-study`,body),
 };
