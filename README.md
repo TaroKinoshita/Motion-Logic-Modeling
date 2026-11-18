@@ -103,7 +103,7 @@ data/           プロジェクトの保存先（Git管理外。MLM_DATA_DIR で
 
 ## まだ無いもの
 
-拍・区間などの音声解析（波形表示のみある）、自動の分割・追跡、ジョブ管理（長い処理の進捗・キャンセル）、仮説・規則の保存、AE/Blender出力、狭い画面幅への対応。計画仕様書 §5・§7 を参照。
+小節・楽曲区間のモデルによる推定、背景が複雑な動画の分解、別の実曲での受け入れ評価、AE/Blender出力が残る。通常編集画面は横幅の広い画面を前提にする。[最新の検証と制約](docs/17_Contour_Blocking_Result.md)。
 
 書き出しは同期処理で一度に最大120秒。比較動画は内部で複数回FFmpegを呼ぶ（計画仕様書 §5 Phase 1）。
 
@@ -114,7 +114,7 @@ v1は読み込み時に移行し、次の変更時にv2で保存する。タイ�
 BPMと文字の分割・秒の時間差は右パネルから変更できる。BPMを変えても元動画・音声・シーン尺は変わらない。
 推定カットなどは右パネルで確定／却下／推定分の一括削除ができる（再解析で候補が再び出る場合あり）。
 
-指定できる登録フォントは現在 `MLM Arial`、ウェイト400/700。Windowsの既存Arialファイルをブラウザとサーバーで共用し、未登録の指定はエラーにする。フォント一覧は `GET /api/fonts`。
+登録フォントは、この端末にある `MLM Arial`、`MLM Yu Gothic`、`MLM BIZ UD Gothic`、ウェイト400/700。Windowsの既存ファイルをブラウザとサーバーで共用する。フォント一覧は `GET /api/fonts`。
 
 検証の再実行：`node scripts/verify-v2.mjs`。既存の合成サンプル `p_mwh3s99t2w85` を読み、`data/v2-validation/` に別プロジェクトとレポートを作る。既定ポート4518（`MLM_VERIFY_PORT`で変更可）。元プロジェクトは編集しない。
 
@@ -131,9 +131,17 @@ UIの「拍を推定」、MCPの`detect_beats`、HTTPの`POST /api/projects/:id/
 
 区間SSIM：MCP `compare_segment(project_id, from, to, width?)` または `POST /api/projects/:id/compare`（JSON: from/to/width）。最大120秒。元動画と簡略版を同じ寸法・フレームレートで比較する。検証は `node scripts/verify-beats-http.mjs`。
 
-領域追跡：`uv sync --project workers/track --python 3.11`。CLI検証は `node scripts/verify-track.mjs C:/Users/kinos/mlm_samples/kinetic_sample.mp4`。HTTP/MCPからも実行でき、観察と近似を分離保存して矩形のキーへ適用する。追跡の専用UIとcubic-bezier近似は未実装。[初期検証](docs/09_Tracking_Comparison_Results.md)、[アプリ接続とM3・M4](docs/10_M3_M4_Implementation.md)。
+領域追跡：`uv sync --project workers/track --python 3.11`。CLI検証は `node scripts/verify-track.mjs C:/Users/kinos/mlm_samples/kinetic_sample.mp4`。HTTP/MCPからも実行でき、観察と近似を分離保存する。輪郭による領域追跡は、観測点の誤差を制限したcubic近似に対応する。 [領域追跡の検証](docs/12_Lyricsample1_Followup.md)
+
+## 輪郭と動きの工程比較
+
+固定フレームレートで背景がほぼ単色の素材を取り込み、「輪郭と動きを解析」を選ぶ。編集しているシーンは履歴に保持される。「工程比較」で入力、動き、関係と時刻、最終調整を4画面または単独で再生できる。箱の修正、区間の再計測、軌道の分割、ブロックのまとめ・解除、出来事の確定・却下、仮説と規則の編集、4面出力をここから行える。解析と4面書き出しはジョブとして進捗、中断、再試行に対応する。
+
+輪郭追跡のPython依存は `workers/track/blocking-requirements.txt`。検証環境はPython 3.11。別の環境を使う場合は `MLM_BLOCKING_PYTHON` を指定する。OCRの重みがない環境でも輪郭を計測できる。 [検証結果と再実行](docs/17_Contour_Blocking_Result.md)
 
 ## M3・M4の初版（API / MCP）
+
+実素材の計測と再現については [Lyricsample1 の再計測](docs/12_Lyricsample1_Followup.md)。`track-region` は明暗のはっきりした字形用の `method:"silhouette"` を選択可能。`observe-glyphs` で合字の部品・ルビを観察として保存できる。既存の日本語フォントと字間の指定、切替の吸着はインスペクターから行える。
 
 レビュー対応：拍指定を新曲へ対応させて保持、常時表示要素の複数区間割当、`hold_group`による複数トラック停止を追加。[仕様と制限](docs/11_Review_Relations_Fix.md)。
 
@@ -147,6 +155,6 @@ MCPの `model_project(project_id, operation, input)` で次を実行できる。
 - `adapt-baselines`：全体速度変更、拍の両端合わせ、固定テンプレートの3比較版を生成。
 - `documents`：観察・仮説・規則・近似・再構成の文書を取得。これは読取なのでinput不要。
 
-生成物は通常のプロジェクトとして既存UIで閲覧・編集・書き出しできる。専用フォームや楽曲構成の自動推定はまだない。実素材による演出評価も未完了。
+工程比較の「観察・仮説・規則」で、拍との照合、モデルの編集、比較版生成、転用区間の指定と比較基準生成を行える。小節頭・区間は手で修正できる。転用時はシーンと輪郭、出来事、外観の時刻を変換する。実曲への転用の受け入れ試験は残る。
 
 統合検証：`node scripts/verify-modeling.mjs C:/Users/kinos/mlm_samples/kinetic_sample.mp4`。隔離した `data/modeling-validation/` にテスト用プロジェクトとreport.jsonを保存する。[根拠・検証・制限](docs/10_M3_M4_Implementation.md)。

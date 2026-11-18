@@ -83,3 +83,28 @@ html, body { overflow-x: auto; }
 .timeline .bar { position: absolute; top: 7px; height: 10px; border-radius: 2px; opacity: 0.55; }
 .timeline .key { position: absolute; top: 7px; width: 8px; height: 8px; margin-left: -4px; margin-top: 1px; background: #fff; transform: rotate(45deg); }
 .timeline .playhead { position: absolute; top: 0; width: 1px; height: 100%; background: var(--accent); pointer-events: none; }
+.blocking-stage { flex:1; min-width:0; display:flex; flex-direction:column; gap:8px; overflow:auto; padding:14px; background:#0e1725; color:#e8f0f9; }
+.blocking-tabs,.blocking-event-list { display:flex; flex-wrap:wrap; gap:7px; }
+.blocking-tabs button[aria-pressed="true"], header button[aria-pressed="true"] { background:#244d56; border-color:#77d9bc; color:#f1fffb; }
+.blocking-grid { flex:1; min-height:240px; display:grid; grid-template:repeat(2,minmax(0,1fr)) / repeat(2,minmax(0,1fr)); gap:10px; }
+.blocking-grid.single { grid-template:minmax(0,1fr) / minmax(0,1fr); }
+.blocking-grid figure { display:flex; flex-direction:column; min-width:0; margin:0; background:#172338; border:1px solid #314054; border-radius:5px; overflow:hidden; }
+.blocking-grid figcaption { padding:7px 10px; font-weight:600; }
+.blocking-grid video,.blocking-grid canvas { display:block; flex:1; min-height:0; width:100%; object-fit:contain; background:#0e1725; }
+.blocking-scrub { display:flex; align-items:center; gap:10px; }
+.blocking-scrub input { flex:1; }
+.app-blocking { min-width:0; }
+.app-blocking header,.app-blocking .transport { flex-wrap:wrap; }
+.app-blocking footer { height:auto; }
+.blocking-tabs,.blocking-grid,.blocking-event-list,.blocking-scrub,.blocking-provenance { width:100%; max-width:1160px; margin-inline:auto; }
+.blocking-grid [hidden] { display:none; }
+.blocking-provenance { color:#a2b7cc; margin-block:0; }
+.blocking-tools { width:100%; max-width:1160px; margin-inline:auto; }
+.blocking-tool-actions,.blocking-fields,.block-job { display:flex; align-items:center; flex-wrap:wrap; gap:7px; }
+.blocking-tool { padding:10px; margin-top:8px; border:1px solid #314054; background:#172338; }
+.blocking-fields { margin:8px 0; }
+.blocking-fields input[type="number"] { width:88px; }
+.blocking-tool textarea { display:block; width:min(100%,720px); margin:8px 0; }
+.blocking-tool pre { max-height:180px; overflow:auto; }
+.blocking-crop { margin:8px 0; max-width:640px; }
+.blocking-crop img { display:block; max-width:100%; }

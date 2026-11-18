@@ -1,7 +1,9 @@
 import { compareSegment } from './compare.ts';
 import { TrackingRequest, trackRegion } from './tracking.ts';
+import { exportBlocking, getBlocking } from './blocking.ts';
+import { BlockExportRequest, blockJobStatus, cancelBlockJob, editBlocking, EditBlockingRequest, latestBlockJob, retryBlockJob, SequenceRequest, startBlockExport, startBlockJob } from './block-edit.ts';
 import { MusicRequest, importMusic } from './music.ts';
-import { MeasureRequest, ModelRequest, VariantRequest, AdaptRequest, BaselineRequest, measureEvents, saveModel, generateVariant, generateAdaptation, generateBaselines } from './modeling.ts';
+import { MeasureRequest, ModelRequest, VariantRequest, AdaptRequest, BaselineRequest, GlyphRequest, measureEvents, saveModel, generateVariant, generateAdaptation, generateBaselines, recordGlyphs } from './modeling.ts';
 import { detectBeats } from './beats.ts';
 // Motion Logic サーバー。UI（ブラウザ）とMCPアダプターの両方がこのHTTP APIを使う。
 // ローカル利用が前提なので 127.0.0.1 にだけ待ち受ける。
@@ -13,7 +15,7 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
-import { applyOps, demoScene, emptyScene, SceneOpSchema } from '@mlm/core';
+import { applyOps, blockingFrame, demoScene, emptyScene, SceneOpSchema } from '@mlm/core';
 import type { Scene } from '@mlm/core';
 import { fonts } from './fonts.ts';
 import { exportVideo } from './export.ts';
@@ -62,7 +64,7 @@ app.get('/api/fonts', c => c.json({ fonts: fonts.map(({ id, family, weight }) =>
 app.get('/api/fonts/:id', c => {
   const font = fonts.find(f => f.id === c.req.param('id'));
   if (!font) throw new HttpError(404, 'フォントがありません');
-  return new Response(new Uint8Array(fs.readFileSync(font.path)), { headers: { 'content-type': 'font/ttf' } });
+  return new Response(new Uint8Array(fs.readFileSync(font.path)), { headers: { 'content-type': path.extname(font.path)==='.ttc'?'font/collection':'font/ttf' } });
 });
 
 app.get('/api/projects', (c) => c.json({ projects: listProjects() }));
@@ -76,10 +78,20 @@ app.post('/api/projects', async (c) => {
 });
 
 app.get('/api/projects/:id', (c) => c.json(getProject(c.req.param('id'))));
+app.get('/api/projects/:id/blocking',c=>c.json({design:getBlocking(c.req.param('id')).design}));
+app.post('/api/projects/:id/blocking/export',async c=>c.json(await exportBlocking(c.req.param('id'))));
+app.post('/api/projects/:id/blocking/export-job',async c=>c.json(startBlockExport(c.req.param('id'),parse(BlockExportRequest,await c.req.json())),202));
+app.post('/api/projects/:id/blocking/edit',async c=>c.json(editBlocking(c.req.param('id'),parse(EditBlockingRequest,await c.req.json()))));
+app.post('/api/projects/:id/blocking/analyze',async c=>c.json(startBlockJob(c.req.param('id'),parse(SequenceRequest,await c.req.json())),202));
+app.get('/api/projects/:id/blocking/jobs/latest',c=>c.json(latestBlockJob(c.req.param('id'))));
+app.get('/api/projects/:id/blocking/jobs/:job',c=>c.json(blockJobStatus(c.req.param('id'),c.req.param('job'))));
+app.post('/api/projects/:id/blocking/jobs/:job/cancel',c=>c.json(cancelBlockJob(c.req.param('id'),c.req.param('job'))));
+app.post('/api/projects/:id/blocking/jobs/:job/retry',c=>c.json(retryBlockJob(c.req.param('id'),c.req.param('job')),202));
 app.get('/api/projects/:id/documents', c => c.json(getDocuments(c.req.param('id'))));
 app.post('/api/projects/:id/track-region', async c => c.json(await trackRegion(c.req.param('id'), parse(TrackingRequest, await c.req.json()))));
 app.post('/api/projects/:id/music', async c => c.json(await importMusic(c.req.param('id'), parse(MusicRequest, await c.req.json()))));
 app.post('/api/projects/:id/measure-events', async c => c.json(measureEvents(c.req.param('id'), parse(MeasureRequest, await c.req.json()))));
+app.post('/api/projects/:id/observe-glyphs', async c => c.json(recordGlyphs(c.req.param('id'), parse(GlyphRequest, await c.req.json()))));
 app.post('/api/projects/:id/model', async c => c.json(saveModel(c.req.param('id'), parse(ModelRequest, await c.req.json()))));
 app.post('/api/projects/:id/variant', async c => c.json(generateVariant(c.req.param('id'), parse(VariantRequest, await c.req.json()))));
 app.post('/api/projects/:id/adapt', async c => c.json(generateAdaptation(c.req.param('id'), parse(AdaptRequest, await c.req.json()))));
@@ -119,18 +131,19 @@ app.post('/api/projects/:id/revert', async (c) => {
 });
 
 /** 取り込んだファイルを調べ、project.json に記録する。シーンの寸法・fps・長さは元動画に合わせる。 */
-async function registerMedia(id: string, file: string, fileName: string, actor: string) {
+async function registerMedia(id: string, file: string, fileName: string, originalName: string, actor: string, baseRevision:number) {
   const source = await probe(file, fileName);
   clearCache(id);
   return commit(id, {
-    baseRevision: null,
+    baseRevision,
     actor,
-    note: `元動画を取り込み: ${fileName}`,
+    note: `元動画を取り込み: ${path.basename(originalName)}`,
     meta: (p) => {
       p.source = source;
       delete p.audioAnalysis;
     },
     scene: (s) => ({ ...s, width: source.width, height: source.height, fps: source.fps, duration: source.duration || s.duration }),
+    documents:({blocks:_blocks,events:_events,appearance:_appearance,...documents})=>documents,
   });
 }
 
@@ -138,23 +151,28 @@ async function registerMedia(id: string, file: string, fileName: string, actor: 
 app.post('/api/projects/:id/media', async (c) => {
   const id = c.req.param('id');
   const body = parse(z.object({ path: z.string().min(1), actor: Actor }), await c.req.json());
-  getProject(id);
+  const {project}=getProject(id);
   const src = path.resolve(body.path.replace(/^"|"$/g, ''));
   if (!fs.existsSync(src) || !fs.statSync(src).isFile()) throw new HttpError(400, `ファイルがありません: ${src}`);
   const target = mediaTarget(id, src);
-  fs.copyFileSync(src, target.file);
-  return c.json(await registerMedia(id, target.file, target.fileName, body.actor));
+  try {
+    fs.copyFileSync(src,target.file);
+    return c.json(await registerMedia(id,target.file,target.fileName,src,body.actor,project.revision));
+  } catch(error) {fs.rmSync(target.file,{force:true});throw error;}
 });
 
 // ブラウザからのアップロード（本体をそのまま送る）。
 app.post('/api/projects/:id/media/upload', async (c) => {
   const id = c.req.param('id');
-  getProject(id);
+  const {project}=getProject(id);
   const body = c.req.raw.body;
   if (!body) throw new HttpError(400, '本体が空です');
-  const target = mediaTarget(id, c.req.query('filename') ?? 'source.mp4');
-  await pipeline(Readable.fromWeb(body as import('node:stream/web').ReadableStream), fs.createWriteStream(target.file));
-  return c.json(await registerMedia(id, target.file, target.fileName, 'human'));
+  const originalName=c.req.query('filename')??'source.mp4';
+  const target=mediaTarget(id,originalName);
+  try {
+    await pipeline(Readable.fromWeb(body as import('node:stream/web').ReadableStream),fs.createWriteStream(target.file));
+    return c.json(await registerMedia(id,target.file,target.fileName,originalName,'human',project.revision));
+  } catch(error) {fs.rmSync(target.file,{force:true});throw error;}
 });
 
 app.delete('/api/projects/:id', (c) => c.json(trashProject(c.req.param('id'), c.req.query('actor') ?? 'human')));
@@ -203,7 +221,7 @@ app.post('/api/projects/:id/detect-beats', async c => {
 });
 
 app.post('/api/projects/:id/export', async (c) => {
-  const { project, scene } = getProject(c.req.param('id'));
+  const { project, scene, design } = getBlocking(c.req.param('id'));
   const body = parse(
     z.object({
       from: z.number().default(0),
@@ -220,6 +238,7 @@ app.post('/api/projects/:id/export', async (c) => {
     to: body.to ?? scene.duration,
     width: body.width ?? scene.width,
     withAudio: body.withAudio,
+    sceneAt: design ? time=>blockingFrame(scene,design,time,'final') : undefined,
   });
   return c.json({ ...result, url: `/api/projects/${project.id}/exports/${result.fileName}` });
 });
@@ -264,7 +283,7 @@ function sendVideo(rangeHeader: string | undefined, file: string): Response {
 
 // 画像の取得。times（カンマ区切り）か from/to/count で時刻を指定する。1つなら単一フレーム。
 app.get('/api/projects/:id/frames', async (c) => {
-  const { project, scene } = getProject(c.req.param('id'));
+  const { project, scene, design } = getBlocking(c.req.param('id'));
   const q = parse(
     z.object({
       kind: z.enum(['source', 'render', 'compare']).default('render'),
@@ -289,7 +308,8 @@ app.get('/api/projects/:id/frames', async (c) => {
     try { region = parse(z.strictObject({ x: z.number().int().nonnegative(), y: z.number().int().nonnegative(), w: z.number().int().positive(), h: z.number().int().positive() }), JSON.parse(q.region)); }
     catch { throw new HttpError(400, 'regionは{x,y,w,h}のJSONで指定してください'); }
   }
-  const jpeg = await renderSheet(project, scene, { region, gridStep: q.gridStep, kind: q.kind as FrameKind, times, cellWidth, columns: q.columns });
+  const jpeg = await renderSheet(project, scene, { region, gridStep: q.gridStep, kind: q.kind as FrameKind, times, cellWidth, columns: q.columns,
+    sceneAt:design?time=>blockingFrame(scene,design,time,'final'):undefined });
   return new Response(new Uint8Array(jpeg), {
     headers: { 'content-type': 'image/jpeg', 'x-mlm-times': times.join(','), 'x-mlm-revision': String(project.revision) },
   });

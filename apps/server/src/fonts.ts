@@ -8,6 +8,10 @@ const root = path.join(process.env.WINDIR ?? 'C:/Windows', 'Fonts');
 export const fonts = [
   { id: 'arial-400', family: 'MLM Arial', weight: 400, path: path.join(root, 'arial.ttf') },
   { id: 'arial-700', family: 'MLM Arial', weight: 700, path: path.join(root, 'arialbd.ttf') },
+  { id: 'yu-gothic-400', family: 'MLM Yu Gothic', weight: 400, path: path.join(root, 'YuGothR.ttc') },
+  { id: 'yu-gothic-700', family: 'MLM Yu Gothic', weight: 700, path: path.join(root, 'YuGothB.ttc') },
+  { id: 'biz-udgothic-400', family: 'MLM BIZ UD Gothic', weight: 400, path: path.join(root, 'BIZ-UDGothicR.ttc') },
+  { id: 'biz-udgothic-700', family: 'MLM BIZ UD Gothic', weight: 700, path: path.join(root, 'BIZ-UDGothicB.ttc') },
 ].filter(f => fs.existsSync(f.path) && GlobalFonts.registerFromPath(f.path, f.family));
 
 export function checkFonts(scene: Scene): void {

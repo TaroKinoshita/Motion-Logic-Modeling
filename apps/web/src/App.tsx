@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { applyOps as applySceneOps } from '@mlm/core';
-import type { HistoryEntry, ProjectMeta, SceneElement, SceneOp } from '@mlm/core';
+import { applyOps as applySceneOps, blockingFrame } from '@mlm/core';
+import type { Blocking, HistoryEntry, ProjectMeta, SceneElement, SceneOp } from '@mlm/core';
+import { BlockingStage } from './BlockingStage.tsx';
+import { BlockJobStatus, BlockingTools, busyJob } from './BlockingTools.tsx';
 import { api, ApiError } from './api.ts';
-import type { ExportResult, ProjectData } from './api.ts';
+import type { BlockJob, ExportResult, ProjectData } from './api.ts';
 import { Inspector } from './Inspector.tsx';
 import { Stage } from './Stage.tsx';
 import type { ViewMode } from './Stage.tsx';
@@ -27,18 +29,24 @@ export function App() {
   const [exportLayout, setExportLayout] = useState<'render' | 'compare'>('render');
   const [exporting, setExporting] = useState(false);
   const [exported, setExported] = useState<ExportResult | null>(null);
+  const [blocking,setBlocking]=useState<{id:string;design:Blocking}|null>(null);
+  const [showBlocking,setShowBlocking]=useState(false);
+  const [blockJob,setBlockJob]=useState<BlockJob|null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const scene = data?.scene;
   // ドラッグ中だけ、保存前の変更を重ねたシーンを表示する。
   const shown = useMemo(() => (scene && dragOps ? applySceneOps(scene, dragOps) : scene), [scene, dragOps]);
   const source = data?.project.source;
+  const id=data?.project.id, revision=data?.project.revision;
+  const design=blocking?.id===projectId?blocking.design:null;
+  const activeBlocking=showBlocking?design:null;
   const duration = scene?.duration ?? 0;
   const fps = scene?.fps ?? 30;
   const hasRange = range.in !== null && range.out !== null && range.out > range.in;
   // 再生する区間。ループ区間が有効ならその中、なければ全体。
-  const playFrom = loop && hasRange ? range.in! : 0;
-  const playTo = loop && hasRange ? range.out! : duration;
+  const playFrom = activeBlocking?.blocks.from ?? (loop && hasRange ? range.in! : 0);
+  const playTo = activeBlocking?.blocks.to ?? (loop && hasRange ? range.out! : duration);
 
   const fail = useCallback((err: unknown) => {
     const e = err as ApiError;
@@ -46,6 +54,18 @@ export function App() {
   }, []);
 
   const reloadList = useCallback(() => api.listProjects().then((r) => setProjects(r.projects)).catch(fail), [fail]);
+
+  useEffect(()=>{
+    if(!id||id!==projectId) return;
+    const controller=new AbortController();
+    fetch(`/api/projects/${id}/blocking`,{signal:controller.signal}).then(async response=>{
+      const value=await response.json();
+      if(!response.ok) throw new Error(value.error??'工程比較を読み込めません');
+      setBlocking(value.design?{id,design:value.design}:null);
+      if(value.design&&new URLSearchParams(location.search).get('compare')==='1') setShowBlocking(true);
+    }).catch(error=>{if(!controller.signal.aborted) {setBlocking(null);fail(error);}});
+    return ()=>controller.abort();
+  },[id,revision,projectId,fail]);
 
   const reload = useCallback(
     (id: string) => {
@@ -55,6 +75,19 @@ export function App() {
     },
     [fail],
   );
+  useEffect(()=>{
+    if(!id||!blockJob||!busyJob(blockJob)) return;
+    const timer=window.setTimeout(()=>{
+      void api.blockingJob(id,blockJob.id).then(job=>{
+        setBlockJob(job);
+        if(job.state==='done') {
+          if(job.operation==='export') setExported(job.output??null);
+          else {setShowBlocking(true);reload(id);}
+        }
+      }).catch(error=>{setBlockJob(null);fail(error);});
+    },350);
+    return ()=>window.clearTimeout(timer);
+  },[id,blockJob,reload,fail]);
 
   useEffect(() => void reloadList(), [reloadList]);
 
@@ -70,11 +103,23 @@ export function App() {
     setTime(0);
     setPlaying(false);
     setExported(null);
+    setShowBlocking(false);
+    setBlocking(null);
+    setBlockJob(null);
     setDragOps(null);
     setRange({ in: null, out: null });
     location.hash = projectId;
     if (projectId) reload(projectId);
   }, [projectId, reload]);
+  useEffect(()=>{
+    if(!projectId) return;
+    let active=true;
+    void api.latestBlockingJob(projectId).then(({job})=>{
+      if(!active||!job) return;
+      setBlockJob(previous=>previous??job);
+    }).catch(()=>{});
+    return ()=>{active=false;};
+  },[projectId]);
 
   // 音声の波形（表示用）。元動画が変わったら取り直す。
   const audioKey = source?.hasAudio ? source.sha256 : null;
@@ -149,7 +194,7 @@ export function App() {
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.playbackRate = speed;
-  }, [speed, data]);
+  }, [speed, data, activeBlocking]);
 
   // 再生。元動画があれば動画の時刻を基準にし、簡略版はそれに追従する。
   useEffect(() => {
@@ -165,6 +210,11 @@ export function App() {
             void v.play();
           } else {
             v.pause();
+            if (activeBlocking) {
+              const lastFrame = Math.max(playFrom, playTo - .5 / fps);
+              v.currentTime = lastFrame;
+              setTime(lastFrame);
+            }
             setPlaying(false);
             return;
           }
@@ -179,15 +229,18 @@ export function App() {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [playing, source, speed, loop, playFrom, playTo]);
+  }, [playing, source, speed, loop, playFrom, playTo, activeBlocking, fps]);
 
   const seek = useCallback(
     (t: number) => {
-      const clamped = Math.min(Math.max(0, t), Math.max(0, duration - 1e-3));
+      const from=activeBlocking?.blocks.from??0;
+      const until=activeBlocking?.blocks.to??duration;
+      const requested=activeBlocking?(Math.floor(t*fps+1e-7)+.5)/fps:t;
+      const clamped = Math.min(Math.max(from, requested), Math.max(from, until - 1e-3));
       setTime(clamped);
       if (videoRef.current) videoRef.current.currentTime = clamped;
     },
-    [duration],
+    [duration,activeBlocking,fps],
   );
 
   const togglePlay = useCallback(() => {
@@ -216,16 +269,17 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).closest('input, textarea, select')) return;
       if (e.code === 'Space') {
+        if ((e.target as HTMLElement).closest('button, a')) return;
         e.preventDefault();
         togglePlay();
       } else if (e.code === 'ArrowRight') step(1);
       else if (e.code === 'ArrowLeft') step(-1);
-      else if (e.code === 'KeyI') setRange((r) => ({ ...r, in: Math.round(time * 1000) / 1000 }));
-      else if (e.code === 'KeyO') setRange((r) => ({ ...r, out: Math.round(time * 1000) / 1000 }));
+      else if (e.code === 'KeyI' && !activeBlocking) setRange((r) => ({ ...r, in: Math.round(time * 1000) / 1000 }));
+      else if (e.code === 'KeyO' && !activeBlocking) setRange((r) => ({ ...r, out: Math.round(time * 1000) / 1000 }));
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [togglePlay, step, time]);
+  }, [togglePlay, step, time, activeBlocking]);
 
   const applyOps = useCallback(
     async (ops: SceneOp[], note: string) => {
@@ -292,8 +346,21 @@ export function App() {
       .finally(() => setExporting(false));
   };
 
+  const compareStages = () => {
+    videoRef.current?.pause();
+    setPlaying(false);
+    if (!showBlocking && design && (time < design.blocks.from || time >= design.blocks.to)) setTime(design.blocks.from);
+    setExported(null);
+    setShowBlocking(!showBlocking);
+  };
+  const exportStages = async () => {
+    if(!data) return;
+    try {setBlockJob(await api.exportBlocking(data.project.id,data.project.revision));}
+    catch(error) {fail(error);}
+  };
+
   return (
-    <div className="app">
+    <div className={activeBlocking?'app app-blocking':'app'}>
       <header>
         <strong>Motion Logic</strong>
         <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
@@ -308,7 +375,18 @@ export function App() {
         <button onClick={() => createProject('demo')}>デモを作成</button>
         {data && <button onClick={deleteProject}>ごみ箱へ</button>}
         <span className="spacer" />
-        {(['side', 'overlay', 'render'] as ViewMode[]).map((m) => (
+        {design && <button aria-pressed={showBlocking} onClick={compareStages}>{showBlocking?'シーン編集へ戻る':'工程比較'}</button>}
+        {id&&revision&&source&&!design&&<button disabled={!!busyJob(blockJob)} onClick={()=>{
+          const cuts=scene?.markers?.filter(marker=>marker.kind==='cut').map(marker=>Math.round(marker.t*scene.fps));
+          const frames=Math.floor(source.duration*source.fps);
+          const step=Math.max(12,Math.ceil(frames/100));
+          const ocrFrames=Array.from({length:Math.floor(frames/step)},(_,index)=>Math.round(step*(index+.5)));
+          void api.analyzeBlocking(id,revision,{cuts,ocrFrames}).then(setBlockJob).catch(fail);
+        }}>輪郭と動きを解析</button>}
+        {id&&blockJob&&<BlockJobStatus job={blockJob}
+          onCancel={()=>{void api.cancelBlocking(id,blockJob.id).then(setBlockJob).catch(fail);}}
+          onRetry={()=>{void api.retryBlocking(id,blockJob.id).then(setBlockJob).catch(fail);}}/>}
+        {!activeBlocking && (['side', 'overlay', 'render'] as ViewMode[]).map((m) => (
           <button key={m} className={mode === m ? 'on' : ''} onClick={() => setMode(m)}>
             {m === 'side' ? '左右比較' : m === 'overlay' ? '重ね表示' : '簡略のみ'}
           </button>
@@ -333,8 +411,13 @@ export function App() {
       ) : (
         <>
           <main>
-            <Stage
-              scene={shown}
+            {activeBlocking && source ? <BlockingStage scene={shown} design={activeBlocking} time={time} videoRef={videoRef}
+              videoUrl={`/api/projects/${data.project.id}/media/source?v=${source.sha256.slice(0, 8)}`} onSeek={seek}>
+              <BlockingTools key={data.project.id} design={activeBlocking} scene={shown} time={time} id={data.project.id}
+                revision={data.project.revision} job={blockJob} onJob={setBlockJob} onRefresh={()=>reload(data.project.id)} onError={fail}
+                projects={projects} audio={data.project.audioAnalysis}/>
+            </BlockingStage> : <Stage
+              scene={design?blockingFrame(shown,design,Math.floor(time*fps+1e-7)/fps,'final'):shown}
               baseScene={scene}
               onSelect={setSelectedId}
               onDragPreview={setDragOps}
@@ -344,8 +427,8 @@ export function App() {
               videoRef={videoRef}
               videoUrl={source ? `/api/projects/${data.project.id}/media/source?v=${source.sha256.slice(0, 8)}` : null}
               selectedId={selectedId}
-            />
-            <Inspector
+            />}
+            {!activeBlocking && <Inspector
               data={data}
               history={history}
               selectedId={selectedId}
@@ -372,7 +455,7 @@ export function App() {
                   .catch(fail)
               }
               onError={fail}
-            />
+            />}
           </main>
           <footer>
             <div className="transport">
@@ -389,17 +472,17 @@ export function App() {
               <span className="time">
                 {time.toFixed(3)} / {duration.toFixed(3)} 秒　フレーム {Math.floor(time * fps + 1e-6)}　{fps.toFixed(3)} fps
               </span>
-              <span className="sep" />
+              {!activeBlocking && <><span className="sep" />
               <button onClick={() => setRange((r) => ({ ...r, in: Math.round(time * 1000) / 1000 }))} title="区間の始点を現在位置に（I）">
                 イン
               </button>
               <button onClick={() => setRange((r) => ({ ...r, out: Math.round(time * 1000) / 1000 }))} title="区間の終点を現在位置に（O）">
                 アウト
-              </button>
+              </button></>}
               <button className={loop ? 'on' : ''} onClick={() => setLoop((l) => !l)} title="区間（なければ全体）を繰り返し再生">
                 ループ
               </button>
-              {(range.in !== null || range.out !== null) && (
+              {!activeBlocking && (range.in !== null || range.out !== null) && (
                 <>
                   <span className="time">
                     区間 {range.in?.toFixed(3) ?? '—'} 〜 {range.out?.toFixed(3) ?? '—'}
@@ -415,6 +498,7 @@ export function App() {
                   r{exported.revision} の書き出しを開く（{exported.frameCount}フレーム{exported.hasAudio ? '・音声つき' : ''}）
                 </a>
               )}
+              {activeBlocking?<button disabled={!!busyJob(blockJob)} onClick={exportStages}>{blockJob?.operation==='export'&&busyJob(blockJob)?'書き出し中…':'4画面をMP4に書き出す'}</button>:<>
               <select value={exportLayout} onChange={(e) => setExportLayout(e.target.value as 'render' | 'compare')} title="書き出す内容">
                 <option value="render">簡略版だけ</option>
                 {source && <option value="compare">元動画と左右に並べる</option>}
@@ -422,8 +506,9 @@ export function App() {
               <button disabled={exporting} title="MP4に書き出す（区間があればその範囲、元動画の音声つき、最大120秒）" onClick={runExport}>
                 {exporting ? '書き出し中…' : 'MP4書き出し'}
               </button>
+              </>}
             </div>
-            <Timeline
+            {!activeBlocking && <Timeline
               scene={shown}
               baseScene={scene}
               time={time}
@@ -434,7 +519,7 @@ export function App() {
               onSelect={setSelectedId}
               onKeyPreview={setDragOps}
               onKeyCommit={(ops, note) => void applyOps(ops, note)}
-            />
+            />}
           </footer>
         </>
       )}

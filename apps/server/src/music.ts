@@ -24,7 +24,9 @@ export async function importMusic(id:string,input:z.infer<typeof MusicRequest>) 
     const width=Math.round(scene.width/2)*2,height=Math.round(scene.height/2)*2;
     await run(process.env.MLM_FFMPEG??'ffmpeg',['-v','error','-f','lavfi','-i',`color=c=black:s=${width}x${height}:r=${scene.fps}`,'-i',source,'-map','0:v','-map','1:a:0','-t',String(seconds),'-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac',file],{windowsHide:true,timeout:180000,maxBuffer:4*1024*1024});
     const manifest=await probe(file,name);
-    return commit(id,{baseRevision:input.baseRevision,actor:input.actor,note:`新曲を取り込み（黒背景の比較用動画）: ${path.basename(source)}`,meta:p=>{p.source=manifest;delete p.audioAnalysis;},scene:s=>({...s,duration:manifest.duration,markers:(s.markers??[]).filter(m=>m.kind!=='beat'&&m.kind!=='downbeat'&&m.kind!=='section')})});
+    return commit(id,{baseRevision:input.baseRevision,actor:input.actor,note:`新曲を取り込み（黒背景の比較用動画）: ${path.basename(source)}`,meta:p=>{p.source=manifest;delete p.audioAnalysis;},
+      scene:s=>({...s,duration:manifest.duration,markers:(s.markers??[]).filter(m=>m.kind!=='beat'&&m.kind!=='downbeat'&&m.kind!=='section')}),
+      documents:({blocks:_blocks,events:_events,appearance:_appearance,...documents})=>documents});
   } catch(err) {
     fs.rmSync(file,{force:true});
     if(err instanceof HttpError) throw err;

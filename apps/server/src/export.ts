@@ -15,6 +15,9 @@ const FFMPEG = process.env.MLM_FFMPEG ?? 'ffmpeg';
 export const MAX_EXPORT_SECONDS = 120;
 
 export interface ExportOptions {
+  /** Server-internal evaluated view using the same renderer. */
+  sceneAt?: (time: number) => Scene;
+  signal?: AbortSignal;
   /** Server-internal unique suffix for concurrent analysis exports. */
   outputTag?: string;
   from: number;
@@ -93,12 +96,13 @@ export async function exportVideo(project: ProjectMeta, scene: Scene, opts: Expo
       const scale = width / scene.width;
       for (let i = 0; i < frameCount; i++) {
         ctx.setTransform(scale, 0, 0, height / scene.height, 0, 0);
-        drawFrame(ctx as unknown as CanvasRenderingContext2D, scene, from + i / fps);
+        const time=from+i/fps;
+        drawFrame(ctx as unknown as CanvasRenderingContext2D, opts.sceneAt?.(time)??scene, time);
         // FFmpegが先に終わると stdin に 'error' が出て once が reject する。終了コードで報告するので握りつぶす。
         if (!stdin.write(canvas.data())) await Promise.race([once(stdin, 'drain').catch(() => {}), done]);
         if (stdin.destroyed) break;
       }
-    });
+    },opts.signal);
 
     if (compare) {
       // 2段目：元動画の区間を、簡略版と同じフレーム数・サイズのファイルとして単独で切り出す。
@@ -160,16 +164,19 @@ async function replaceFile(from: string, to: string): Promise<void> {
 }
 
 /** FFmpegを起動して終了を待つ。feed を渡すと stdin へ書き込み、終わったら閉じる。失敗は HttpError にする。 */
-async function runFfmpeg(
+export async function runFfmpeg(
   args: string[],
   feed?: (stdin: NodeJS.WritableStream & { destroyed: boolean }, done: Promise<number>) => Promise<void>,
+  signal?:AbortSignal,
 ): Promise<void> {
-  const ff = spawn(FFMPEG, args, { stdio: [feed ? 'pipe' : 'ignore', 'ignore', 'pipe'], windowsHide: true });
+  signal?.throwIfAborted();
+  const ff = spawn(FFMPEG, args, { stdio: [feed ? 'pipe' : 'ignore', 'ignore', 'pipe'], windowsHide: true,signal });
   let stderr = '';
   ff.stderr?.on('data', (d) => (stderr += d));
   const done = new Promise<number>((resolve, reject) => {
-    ff.on('error', reject);
-    ff.on('close', (code) => resolve(code ?? 1));
+    let error:Error|undefined;
+    ff.on('error',value=>{error=value;});
+    ff.on('close',code=>error?reject(error):resolve(code??1));
   });
   if (feed && ff.stdin) {
     ff.stdin.on('error', () => {}); // FFmpegが先に落ちた場合は終了コードで報告する
@@ -177,8 +184,10 @@ async function runFfmpeg(
     ff.stdin.end();
   }
   const code = await done.catch((err: NodeJS.ErrnoException) => {
+    signal?.throwIfAborted();
     throw new HttpError(500, err.code === 'ENOENT' ? 'ffmpeg が見つかりません' : `ffmpeg の起動に失敗: ${err.message}`);
   });
+  signal?.throwIfAborted();
   if (code !== 0) throw new HttpError(500, 'ffmpeg での書き出しに失敗しました', stderr.slice(-2000));
 }
 

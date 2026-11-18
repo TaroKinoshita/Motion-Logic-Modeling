@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 from track.__main__ import track
 from track.fit import fit_track
+from track.easing import fit_eased_track
 
 
 class TrackingTests(unittest.TestCase):
@@ -55,6 +56,13 @@ class TrackingTests(unittest.TestCase):
         self.assertAlmostEqual(fitted['maxSampleError']['x'], 0)
         with self.assertRaises(ValueError):
             fit_track([samples[0],samples[0]])
+
+    def test_cubic_fit_compresses_eased_motion(self):
+        samples = [dict(t=p,x=120*(3*p*p-2*p**3),y=0,scale=1,widthScale=1,rotation=0) for p in np.linspace(0,1,13)]
+        result = fit_eased_track(samples)
+        self.assertEqual(len(result['tracks']['x']),2)
+        self.assertIn('cubic',result['tracks']['x'][0]['easing'])
+        self.assertLess(result['maxSampleError']['x'],1e-6)
 
 
 if __name__ == '__main__':

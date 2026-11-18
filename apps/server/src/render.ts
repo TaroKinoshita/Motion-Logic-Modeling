@@ -24,6 +24,7 @@ function drawScene(ctx: SKRSContext2D, scene: Scene, t: number, x: number, y: nu
 }
 
 export interface SheetOptions {
+  sceneAt?: (time:number)=>Scene;
   kind: FrameKind;
   times: number[];
   /** 1コマ（compare では片側）の幅。 */
@@ -80,12 +81,13 @@ export async function renderSheet(project: ProjectMeta, scene: Scene, opts: Shee
     }
     if (kind !== 'source') {
       const px = kind === 'compare' ? x0 + cellWidth + gap : x0;
+      const projected=opts.sceneAt?.(t)??scene;
       if (opts.region) {
         ctx.save(); ctx.beginPath(); ctx.rect(px, y0, cellWidth, paneH); ctx.clip();
         ctx.translate(px - region.x * cellWidth / region.w, y0 - region.y * paneH / region.h);
         ctx.scale(cellWidth / region.w * refWidth / scene.width, paneH / region.h * refHeight / scene.height);
-        drawFrame(ctx as unknown as CanvasRenderingContext2D, scene, t); ctx.restore();
-      } else drawScene(ctx, scene, t, px, y0, cellWidth);
+        drawFrame(ctx as unknown as CanvasRenderingContext2D, projected, t); ctx.restore();
+      } else drawScene(ctx, projected, t, px, y0, cellWidth);
     }
     if (opts.gridStep) for (let pane = 0; pane < panes; pane++) {
       const px = x0 + pane * (cellWidth + gap);

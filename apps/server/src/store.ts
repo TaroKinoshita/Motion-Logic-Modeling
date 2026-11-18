@@ -9,6 +9,7 @@ import { checkFonts } from './fonts.ts';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
+import { gzipSync, gunzipSync } from 'node:zlib';
 import { SCHEMA_VERSION, migrateScene, validateScene } from '@mlm/core';
 import type { HistoryEntry, ProjectMeta, Scene } from '@mlm/core';
 
@@ -41,20 +42,37 @@ export function projectDir(id: string): string {
 function writeJson(file: string, value: unknown): void {
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
-  fs.renameSync(tmp, file);
+  replaceFile(tmp,file);
+}
+
+const fileRetry=new Int32Array(new SharedArrayBuffer(4));
+function replaceFile(tmp:string,file:string) {
+  for(let i=0;;i++) {
+    try {fs.renameSync(tmp,file);return;}
+    catch(error) {
+      if(i>=7||!['EPERM','EACCES','EBUSY'].includes((error as NodeJS.ErrnoException).code??'')) throw error;
+      Atomics.wait(fileRetry,0,0,10*(i+1));
+    }
+  }
 }
 
 function readJson<T>(file: string): T {
   return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
 }
 
-export const DOCUMENT_NAMES = ['observations', 'hypotheses', 'motion_rules', 'simplification', 'adaptation'] as const;
+export const DOCUMENT_NAMES = ['observations', 'hypotheses', 'motion_rules', 'simplification', 'adaptation', 'blocks', 'events', 'appearance'] as const;
 export type ProjectDocuments = Partial<Record<typeof DOCUMENT_NAMES[number], unknown>>;
+type RevisionSnapshot=HistoryEntry & {scene:Scene;documents?:ProjectDocuments;media?:{source?:ProjectMeta['source'];audioAnalysis?:ProjectMeta['audioAnalysis']}};
+const revisionFile=(dir:string,revision:number)=>path.join(dir,'history',`r${String(revision).padStart(6,'0')}.json`);
+function readRevision(file:string):RevisionSnapshot {
+  if(fs.existsSync(file)) return readJson<RevisionSnapshot>(file);
+  return JSON.parse(gunzipSync(fs.readFileSync(`${file}.gz`)).toString('utf8')) as RevisionSnapshot;
+}
 /** History is authoritative, so documents and scene are read at the same revision. */
 export function getDocuments(id: string): ProjectDocuments {
-  const { project } = getProject(id);
-  const file = path.join(projectDir(id), 'history', `r${String(project.revision).padStart(6, '0')}.json`);
-  return readJson<{ documents?: ProjectDocuments }>(file).documents ?? {};
+  const dir=projectDir(id);
+  const project=readProjectMeta(dir,id);
+  return readRevision(revisionFile(dir,project.revision)).documents??{};
 }
 
 /** スキーマ検査と整合性検査を通ったシーンだけを返す。 */
@@ -77,18 +95,29 @@ export function listProjects(): ProjectMeta[] {
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
-export function getProject(id: string): { project: ProjectMeta; scene: Scene } {
-  const dir = projectDir(id);
+function readProjectMeta(dir:string,id:string):ProjectMeta {
   if (!fs.existsSync(path.join(dir, 'project.json'))) throw new HttpError(404, `プロジェクト ${id} がありません`);
-  return {
-    project: readJson<ProjectMeta>(path.join(dir, 'project.json')),
-    scene: checkScene(readJson<unknown>(path.join(dir, 'scene.json'))),
-  };
+  return readJson<ProjectMeta>(path.join(dir,'project.json'));
+}
+export function getProject(id: string): { project: ProjectMeta; scene: Scene } {
+  const dir=projectDir(id);
+  const project=readProjectMeta(dir,id);
+  return {project,scene:checkScene(readRevision(revisionFile(dir,project.revision)).scene)};
 }
 
 function writeRevision(dir: string, project: ProjectMeta, scene: Scene, actor: string, note: string, documents: ProjectDocuments = {}): void {
   const entry: HistoryEntry = { revision: project.revision, at: project.updatedAt, actor, note };
-  writeJson(path.join(dir, 'history', `r${String(project.revision).padStart(6, '0')}.json`), { ...entry, scene, documents });
+  const snapshot:RevisionSnapshot={...entry,scene,documents,media:{source:project.source,audioAnalysis:project.audioAnalysis}};
+  const archive=revisionFile(dir,project.revision);
+  const encoded=JSON.stringify(snapshot);
+  if(Buffer.byteLength(encoded)>128*1024) {
+    fs.writeFileSync(`${archive}.gz.tmp`,gzipSync(encoded,{level:3}));
+    replaceFile(`${archive}.gz.tmp`,`${archive}.gz`);
+    fs.rmSync(archive,{force:true});
+  } else {
+    writeJson(archive,snapshot);
+    fs.rmSync(`${archive}.gz`,{force:true});
+  }
   // Human-readable mirrors; readers use the revision snapshot above, not these files.
   for (const name of DOCUMENT_NAMES) {
     const file=path.join(dir, `${name}.json`);
@@ -161,21 +190,22 @@ export function trashProject(id: string, actor: string): { trashedTo: string } {
 
 export function listHistory(id: string): HistoryEntry[] {
   const dir = path.join(projectDir(id), 'history');
-  getProject(id);
+  const project=readProjectMeta(projectDir(id),id);
   return fs
     .readdirSync(dir)
-    .filter((f) => f.endsWith('.json'))
+    .filter(f=>/^r\d+\.json(?:\.gz)?$/.test(f)&&Number(/^r(\d+)/.exec(f)?.[1])<=project.revision)
     .sort()
     .map((f) => {
-      const { revision, at, actor, note } = readJson<HistoryEntry>(path.join(dir, f));
+      const { revision, at, actor, note } = readRevision(path.join(dir, f.replace(/\.gz$/,'')));
       return { revision, at, actor, note };
     });
 }
 
 /** 過去のリビジョンのシーンを、新しいリビジョンとして復元する（履歴は消さない）。 */
 export function revertTo(id: string, toRevision: number, baseRevision: number | null, actor: string) {
-  const file = path.join(projectDir(id), 'history', `r${String(toRevision).padStart(6, '0')}.json`);
-  if (!fs.existsSync(file)) throw new HttpError(404, `リビジョン ${toRevision} の控えがありません`);
-  const old = readJson<{ scene: Scene; documents?: ProjectDocuments }>(file);
-  return commit(id, { baseRevision, actor, note: `リビジョン ${toRevision} に戻す`, scene: () => old.scene, documents: () => old.documents ?? {} });
+  const file=revisionFile(projectDir(id),toRevision);
+  if(toRevision>readProjectMeta(projectDir(id),id).revision||(!fs.existsSync(file)&&!fs.existsSync(`${file}.gz`))) throw new HttpError(404,`リビジョン ${toRevision} の控えがありません`);
+  const old=readRevision(file);
+  return commit(id,{baseRevision,actor,note:`リビジョン ${toRevision} に戻す`,scene:()=>old.scene,documents:()=>old.documents??{},
+    meta:old.media?project=>{project.source=old.media!.source;project.audioAnalysis=old.media!.audioAnalysis;}:undefined});
 }

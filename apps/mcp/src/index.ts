@@ -96,7 +96,10 @@ Motion Logic は、参考映像の「動きと演出構成」を単純な図形�
 
 ## M2〜M4の計測・モデル・再構成
 - model_project(project_id, operation, input) を使う。documentsは読取（inputなし）。他はinput.baseRevisionが必須。actorはMCPが設定する。
-- track-region: {baseRevision,from,to,region:{x,y,w,h}}。10秒以内のCFR動画から領域を追跡し、観察と線形キー近似を分離保存、推定領域の矩形を追加する。輪郭分解ではない。
+- track-region: {baseRevision,from,to,region:{x,y,w,h},method?:"features"|"silhouette",polarity?:"dark"|"light",threshold?}。CFR動画の10秒以内。featuresは特徴点。silhouetteはコントラストが高い字形の重心・外接寸法を測り、線形または単調cubicで近似。初期領域は対象だけを余白つきで囲む。欠測を記録し、矩形のキーとして確認できる。
+- track-regionにtargetElementIdを指定すると、silhouette結果を既存の文字へ直接適用。親なし・分割なしの文字の表示区間と、追跡するフレーム範囲を一致させる。位置・幅・高さ・アンカーを置換し、回転は0。最後まで追跡できなければ適用しない。
+- observe-glyphs: {baseRevision,entries:[{from,to,relation:"combine",parts:[{text,elementId?}],result:{text,elementId?}} または {from,to,relation:"ruby",base:{text,elementId?},ruby:{text,elementId?}}]}。元動画で観察した文字構成を記録する。観察IDは仮説から参照できる。
+- 合字の比較版にはcombine観察へcombineAt（秒）と全ての文字要素IDを記録。modelの規則は {id,hypothesisId,kind:"glyph_combine",observationId,partCompanions?:{部品ID:[付随要素ID]},resultCompanions?:[付随要素ID]}。対象の観察を仮説にも紐づける。variantのsecondsは登場の間隔、order:"reverse"は部品順の反転、mergeOffsetSecondsは合体時刻の変化。付随要素のキーもずらす。合体後の表示が観察区間外に出る変更は拒否する。
 - measure-events: {baseRevision,events:[{label,t,origin:"manual"|"measured"|"estimated",elementId?}]}。最寄りbeatとの差。負=イベント先行、正=遅延。同距離は前の拍。
 - model: {baseRevision,hypotheses:[{id,text,observationIds:[ID],status:"proposed"|"accepted"|"rejected"}],rules:[{id,hypothesisId,kind:"hold",elementId,property:"x"|"y"|"scaleX"|"scaleY"|"rotation"|"opacity",keyIndex} または {id,hypothesisId,kind:"stagger",elementId}]}。既定はID単位で追加・更新。全置換はinput.mode="replace"を明示。規則の仮説はacceptedが必要。採用は仮説の証明ではない。
 - variant: {baseRevision,ruleId,seconds,name}。別プロジェクトを作成。holdは同値の連続キー間隔と後続キー時刻を変更（当該トラックだけ、繰返し不可、表示区間超過は拒否）。staggerは文字の時間差を変更。規則保存後にシーンが変わっていたら再確認が必要。
@@ -104,6 +107,8 @@ Motion Logic は、参考映像の「動きと演出構成」を単純な図形�
 - music: {baseRevision,path}。ローカルの120秒以内の音声を黒背景の動画として取り込む。既存と同じ再生・書き出し経路を使う。新規プロジェクトで実行後detect_beats、必要なら推定拍を修正する。
 - adapt: {baseRevision,targetProjectId,targetRevision,name,sections:[{sourceFrom,sourceTo,targetFrom,targetTo,elementIds:[ID],reason}]}。全要素の割当を明示。常時表示の背景・親・タイトルは連続する複数区間に同じIDを含める（複製しない）。親子は別区間も可能。秒キーは区間倍率で変換し、拍キーは新曲の拍へ対応、beatとtempoを保持。不等間隔な拍との差はoffsetSecondsに保存。拍情報がない場合に関係を秒へ黙って焼き込むことはしない。区間外の明示した表示範囲も保持。自動の曲構成理解は行わない。
 - adapt-baselines: {baseRevision,targetProjectId,targetRevision,name}。全体速度のみ、最初/最後の拍合わせのみ、固定テンプレートの3版を作る。両シーンに2拍以上必要。拍の局所補正はしない。
+- blocking / blocking/analyze / blocking/edit: 工程比較の取得、輪郭計測ジョブの開始、工程の編集。更新はbaseRevision必須。解析はfrom/toをフレーム番号で指定し、regionは元動画pxの[x,y,w,h]。既存ブロックの再計測はblockIdとregionが必要。
+- blocking/export-job: {baseRevision}で4画面のMP4を書き出すジョブを開始。blocking/job / blocking/cancel / blocking/retry: {jobId}で解析・書き出しジョブの状態を読み取り・中断・再試行。
 - documentsでobservations/hypotheses/motion_rules/simplification/adaptationを読む。シーンと同じ履歴に保存しrevertで一緒に戻る。生成結果は通常のget_frames/render_preview/UIで確認できる。
 
 ## v2の関係記述（詳細）
@@ -112,7 +117,7 @@ Motion Logic は、参考映像の「動きと演出構成」を単純な図形�
 - textのsplit:"char"|"word"、stagger:{interval,order?:"forward"|"reverse"}、unitTransform。
   transformは全体に適用し、unitTransformだけを単位の順序×interval遅らせる。単位x/yは組版位置からの差分。
   登場前を隠すにはunitTransform.opacityを0から始める。charは書記素単位（空白も順序に数える）、wordは空白区切り（空白は幅のみ）。一行のみ。
-- letterSpacingはsplit時のみ。fontFamilyは現在"MLM Arial"（fontWeight 400/700）を登録。同じローカルファイルをUIとサーバーで使う。未登録指定はエラー。
+- letterSpacingはsplit時のみ（UIの字間設定は必要に応じて文字分割を選ぶ）。認識された書体とウェイトはGET /api/fontsを参照。同じローカルファイルをUIとサーバーで使う。未登録指定はエラー。
 - anchorX/anchorYは中心原点のローカルpx。行列はT(x,y) R S T(-anchor)。既定0でv1の見た目を保持。
 - キートラックにrepeat:{every,count? または until?}。everyは正の長さ、countは初回込み。最初のキーから繰り返す。
   キー範囲は1周期以内。周期末は最終値を保持し、次周期の境界で先頭へ。終了後は終了直前の値を保持。
@@ -333,8 +338,17 @@ server.registerTool('detect_beats', {
 
 server.registerTool('model_project', {
   description: '計測・仮説・規則・比較版・別曲への区間対応。詳しい入力はget_guide。更新はbaseRevision必須。',
-  inputSchema: { project_id:z.string(), operation:z.enum(['documents','track-region','measure-events','model','variant','adapt','adapt-baselines','music']), input:z.record(z.string(),z.unknown()).optional() },
-}, tool(async (a:{project_id:string;operation:string;input?:Record<string,unknown>}) => [text(await call(a.operation==='documents'?'GET':'POST',`/api/projects/${a.project_id}/${a.operation}`,a.operation==='documents'?undefined:{...a.input,actor:ACTOR}))]));
+  inputSchema: { project_id:z.string(), operation:z.enum(['documents','track-region','measure-events','observe-glyphs','model','variant','adapt','adapt-baselines','music','blocking','blocking/analyze','blocking/edit','blocking/export-job','blocking/job','blocking/cancel','blocking/retry']), input:z.record(z.string(),z.unknown()).optional() },
+}, tool(async (a:{project_id:string;operation:string;input?:Record<string,unknown>}) => {
+  const base=`/api/projects/${encodeURIComponent(a.project_id)}`;
+  if(['blocking/job','blocking/cancel','blocking/retry'].includes(a.operation)) {
+    const id=encodeURIComponent(z.string().uuid().parse(a.input?.jobId));
+    const action=a.operation.split('/')[1];
+    return [text(await call(action==='job'?'GET':'POST',`${base}/blocking/jobs/${id}${action==='job'?'':'/'+action}`))];
+  }
+  const read=a.operation==='documents'||a.operation==='blocking';
+  return [text(await call(read?'GET':'POST',`${base}/${a.operation}`,read?undefined:{...a.input,actor:ACTOR}))];
+}));
 
 server.registerTool('compare_segment', {
   description: '元動画と簡略版の指定区間をSSIMで比較。区間・revision・比較条件付きの数値を返す。最大120秒。',

@@ -7,3 +7,6 @@ export * from './migrate.ts';
 export * from './text.ts';
 export * from './timeline.ts';
 export * from './adapt.ts';
+export * from './snap.ts';
+export * from './glyph-rule.ts';
+export * from './blocking.ts';

@@ -5,6 +5,10 @@ export interface SectionMap { sourceFrom: number; sourceTo: number; targetFrom: 
 
 /** Preserve beat keys; map second-based keys through the element's contiguous sections. */
 export function retimeSections(source: Scene, target: Scene, sections: SectionMap[], preserveBeats = true): Scene {
+  return planSectionRetiming(source,target,sections,preserveBeats).scene;
+}
+
+export function planSectionRetiming(source:Scene,target:Scene,sections:SectionMap[],preserveBeats=true) {
   if (!sections.length) throw new Error('区間対応が必要です');
   const assignments = new Map<string, SectionMap[]>();
   const beatTimes=[...new Set((target.markers??[]).filter(m=>m.kind==='beat').map(m=>m.t))].sort((a,b)=>a-b);
@@ -28,10 +32,8 @@ export function retimeSections(source: Scene, target: Scene, sections: SectionMa
       assignments.set(id,[...(assignments.get(id)??[]),s]);
     }
   }
-  const elements = source.elements.map(original=>{
-    const spans = assignments.get(original.id)?.sort((a,b)=>a.sourceFrom-b.sourceFrom);
-    if(!spans) throw new Error(`要素 ${original.id} の区間対応がありません`);
-    for(let i=1;i<spans.length;i++) if(Math.abs(spans[i-1].sourceTo-spans[i].sourceFrom)>1e-8 || Math.abs(spans[i-1].targetTo-spans[i].targetFrom)>1e-8) throw new Error('同じ要素の複数区間は元・先とも連続して指定してください');
+  const maps=new Map<string,ReturnType<typeof mapper>>();
+  function mapper(spans:SectionMap[]) {
     const section=(t:number)=>spans.find(s=>t<s.sourceTo)??spans.at(-1)!;
     const ratioOf=(s:SectionMap)=>(s.targetTo-s.targetFrom)/(s.sourceTo-s.sourceFrom);
     const time=(t:Time):Time=>{
@@ -45,6 +47,15 @@ export function retimeSections(source: Scene, target: Scene, sections: SectionMa
     const duration=(d:Duration):Duration=>typeof d!=='number'&&tempo?structuredClone(d):resolveDuration(d,source.tempo)*ratioOf(spans[0]);
     const track=(t:Track):Track=>typeof t==='number'?t:{keys:t.keys.map(k=>({...k,t:time(k.t)})),...(t.repeat?{repeat:{every:duration(t.repeat.every),...(t.repeat.count!==undefined?{count:t.repeat.count}:{}),...(t.repeat.until!==undefined?{until:time(t.repeat.until)}:{})}}:{})};
     const transform=(t?:Transform):Transform|undefined=>t?Object.fromEntries(Object.entries(t).map(([k,v])=>[k,track(v)])):undefined;
+    return {time,track,transform,duration};
+  }
+  const elements = source.elements.map(original=>{
+    const spans = assignments.get(original.id)?.sort((a,b)=>a.sourceFrom-b.sourceFrom);
+    if(!spans) throw new Error(`要素 ${original.id} の区間対応がありません`);
+    for(let i=1;i<spans.length;i++) if(Math.abs(spans[i-1].sourceTo-spans[i].sourceFrom)>1e-8 || Math.abs(spans[i-1].targetTo-spans[i].targetFrom)>1e-8) throw new Error('同じ要素の複数区間は元・先とも連続して指定してください');
+    const map=mapper(spans);
+    maps.set(original.id,map);
+    const {time,transform,duration}=map;
     const start=time(original.inPoint??(preserveBeats?spans[0].sourceFrom:0));
     const end=time(original.outPoint??(preserveBeats?spans.at(-1)!.sourceTo:source.duration));
     if(resolveTime(end,tempo)<=resolveTime(start,tempo)) throw new Error(`要素 ${original.id} の表示区間が不正です`);
@@ -55,7 +66,9 @@ export function retimeSections(source: Scene, target: Scene, sections: SectionMa
     return e;
   });
   // Keep reference geometry; target contributes duration and music markers only.
-  return {...structuredClone(source),duration:target.duration,tempo,markers:structuredClone(target.markers??[]),elements};
+  const scene:Scene={...structuredClone(source),duration:target.duration,tempo,markers:structuredClone(target.markers??[]),elements};
+  const overall=mapper([...sections].sort((a,b)=>a.sourceFrom-b.sourceFrom));
+  return {scene,forElement:(id?:string)=>id?maps.get(id)??overall:overall};
 }
 
 /** Explicit hold on one track; other element tracks are intentionally not inferred. */

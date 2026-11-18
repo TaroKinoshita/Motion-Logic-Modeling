@@ -4,6 +4,7 @@ data/
 *.log
 .DS_Store
 .venv/
+.venv-blocking/
 __pycache__/
 # 研究リポジトリの比較用clone・モデル重みはコミットしない
 external/

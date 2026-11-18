@@ -1,6 +1,6 @@
 // 入力動画の取り込み・情報取得・フレーム抽出。FFmpeg / ffprobe を子プロセスで呼ぶ。
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ProjectMeta, SourceManifest } from '@mlm/core';
@@ -81,7 +81,7 @@ export function sourcePath(project: ProjectMeta): string {
 /** media/ に置く安全なファイル名にする。 */
 export function mediaTarget(projectId: string, originalName: string): { file: string; fileName: string } {
   const ext = path.extname(originalName).toLowerCase().replace(/[^.a-z0-9]/g, '') || '.mp4';
-  const fileName = `source${ext}`;
+  const fileName = `source-${randomUUID()}${ext}`;
   return { file: path.join(projectDir(projectId), 'media', fileName), fileName };
 }
 

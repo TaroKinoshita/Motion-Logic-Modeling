@@ -44,14 +44,20 @@ export function drawFrame(ctx: CanvasRenderingContext2D, scene: Scene, t: number
       }
     } else {
       ctx.beginPath();
-      if (el.type === 'ellipse') {
+      if (el.outline) {
+        for (const polygon of el.outline) {
+          ctx.moveTo((polygon[0]/4096-.5)*w, (polygon[1]/4096-.5)*h);
+          for (let i = 2; i < polygon.length; i += 2) ctx.lineTo((polygon[i]/4096-.5)*w, (polygon[i+1]/4096-.5)*h);
+          ctx.closePath();
+        }
+      } else if (el.type === 'ellipse') {
         ctx.ellipse(0, 0, w / 2, h / 2, 0, 0, Math.PI * 2);
       } else if (el.cornerRadius) {
         ctx.roundRect(-w / 2, -h / 2, w, h, Math.min(el.cornerRadius, w / 2, h / 2));
       } else {
         ctx.rect(-w / 2, -h / 2, w, h);
       }
-      if (el.fill !== 'none') ctx.fill();
+      if (el.fill !== 'none') ctx.fill(el.outline?'evenodd':'nonzero');
       if (el.stroke) {
         ctx.strokeStyle = el.stroke;
         ctx.lineWidth = el.strokeWidth ?? 1;

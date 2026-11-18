@@ -56,6 +56,8 @@ export const ElementSchema = z.strictObject({
   height: z.number().optional(),
   cornerRadius: z.number().optional(),
   fill: z.string().optional(),
+  /** Closed polygons in 0..4096 local box coordinates; nested polygons create holes. */
+  outline: z.array(z.array(z.number()).min(6).refine(points => points.length % 2 === 0)).optional(),
   stroke: z.string().optional(),
   strokeWidth: z.number().optional(),
   text: z.string().optional(),

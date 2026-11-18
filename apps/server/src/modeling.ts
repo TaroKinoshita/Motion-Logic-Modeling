@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { z } from 'zod';
-import { retimeSections, varyHold, varyHoldGroup, demoScene } from '@mlm/core';
+import { BlockingSchema, planSectionRetiming, retimeBlocking, varyHold, varyHoldGroup, varyGlyphSequence, demoScene, withBlockingBeatLinks } from '@mlm/core';
 import type { Scene } from '@mlm/core';
 import { checkScene, commit, createProject, getDocuments, getProject, HttpError, projectDir, trashProject } from './store.ts';
 import type { ProjectDocuments } from './store.ts';
@@ -12,23 +12,44 @@ const Revision = z.number().int().positive();
 const fingerprint=(scene:Scene)=>createHash('sha256').update(JSON.stringify(scene)).digest('hex');
 const Actor = z.string().min(1).max(40).default('human');
 export const MeasureRequest = z.strictObject({baseRevision:Revision,actor:Actor,events:z.array(z.strictObject({label:z.string().min(1),t:z.number().nonnegative(),origin:z.enum(['manual','measured','estimated']),elementId:z.string().optional()})).min(1).max(1000)});
+const Glyph=z.strictObject({text:z.string().min(1).max(100),elementId:z.string().optional()});
+const GlyphEvidence=z.strictObject({from:z.number().nonnegative(),to:z.number().positive(),note:z.string().max(500).optional()});
+const CombineEvidence=GlyphEvidence.extend({relation:z.literal('combine'),parts:z.array(Glyph).min(2).max(20),result:Glyph,combineAt:z.number().nonnegative().optional()});
+export const GlyphRequest=z.strictObject({baseRevision:Revision,actor:Actor,entries:z.array(z.discriminatedUnion('relation',[
+  CombineEvidence,
+  GlyphEvidence.extend({relation:z.literal('ruby'),base:Glyph,ruby:Glyph}),
+])).min(1).max(100)});
 const Hypothesis = z.strictObject({id:z.string().min(1),text:z.string().min(1),observationIds:z.array(z.string()).min(1),status:z.enum(['proposed','accepted','rejected'])});
 const HoldTarget=z.strictObject({elementId:z.string(),property:z.enum(['x','y','scaleX','scaleY','rotation','opacity']),keyIndex:z.number().int().nonnegative()});
 const Rule = z.discriminatedUnion('kind',[
+  z.strictObject({id:z.string().min(1),hypothesisId:z.string(),kind:z.literal('event_timing'),eventId:z.string(),from:z.number().nonnegative(),to:z.number().positive()}),
+  z.strictObject({id:z.string().min(1),hypothesisId:z.string(),kind:z.literal('glyph_combine'),observationId:z.string(),partCompanions:z.record(z.string(),z.array(z.string()).max(20)).optional(),resultCompanions:z.array(z.string()).max(20).optional()}),
   z.strictObject({id:z.string().min(1),hypothesisId:z.string(),kind:z.literal('hold_group'),targets:z.array(HoldTarget).min(1).max(100)}),
   z.strictObject({id:z.string().min(1),hypothesisId:z.string(),kind:z.literal('stagger'),elementId:z.string()}),
   z.strictObject({id:z.string().min(1),hypothesisId:z.string(),kind:z.literal('hold'),elementId:z.string(),property:z.enum(['x','y','scaleX','scaleY','rotation','opacity']),keyIndex:z.number().int().nonnegative()}),
 ]);
 export const ModelRequest = z.strictObject({baseRevision:Revision,actor:Actor,mode:z.enum(['merge','replace']).default('merge'),hypotheses:z.array(Hypothesis).max(100),rules:z.array(Rule).max(100)});
-export const VariantRequest = z.strictObject({baseRevision:Revision,actor:Actor,ruleId:z.string(),seconds:z.number().nonnegative(),name:z.string().min(1).max(100)});
+export const VariantRequest = z.strictObject({baseRevision:Revision,actor:Actor,ruleId:z.string(),seconds:z.number().nonnegative(),name:z.string().min(1).max(100),mergeOffsetSeconds:z.number().optional(),order:z.enum(['observed','reverse']).optional()});
 const Section = z.strictObject({sourceFrom:z.number().nonnegative(),sourceTo:z.number().positive(),targetFrom:z.number().nonnegative(),targetTo:z.number().positive(),elementIds:z.array(z.string()).min(1),reason:z.string().min(1)});
 export const AdaptRequest = z.strictObject({baseRevision:Revision,actor:Actor,targetProjectId:z.string(),targetRevision:Revision,name:z.string().min(1).max(100),sections:z.array(Section).min(1).max(100)});
-export const BaselineRequest = AdaptRequest.omit({sections:true});
+export const BaselineRequest = AdaptRequest.omit({sections:true}).extend({includeLocalBeat:z.boolean().default(false)});
 
 function current(id:string,revision:number) {
   const state=getProject(id);
   if(state.project.revision!==revision) throw new HttpError(409,'最新のrevisionを読み直してください');
   return state;
+}
+export function recordGlyphs(id:string,input:z.infer<typeof GlyphRequest>) {
+  const {project,scene}=current(id,input.baseRevision);
+  const observations=input.entries.map(entry=>{
+    const glyphs=entry.relation==='combine'?[...entry.parts,entry.result]:[entry.base,entry.ruby];
+    if(entry.to<=entry.from || entry.to>Math.min(scene.duration,project.source?.duration??scene.duration)) throw new HttpError(422,'文字構成の観察区間が不正です');
+    if(entry.relation==='combine' && entry.combineAt!==undefined && (entry.combineAt<=entry.from || entry.combineAt>=entry.to)) throw new HttpError(422,'合体時刻は観察区間の中に指定してください');
+    for(const glyph of glyphs) if(glyph.elementId&&!scene.elements.some(e=>e.id===glyph.elementId&&e.type==='text'&&e.text===glyph.text)) throw new HttpError(422,`文字と要素が一致しません: ${glyph.elementId}`);
+    return {...entry,id:randomUUID(),kind:'glyph-structure',origin:'manual',sourceProjectId:id,sourceRevision:project.revision,sourceSha256:project.source?.sha256};
+  });
+  const result=commit(id,{baseRevision:input.baseRevision,actor:input.actor,note:`文字構成の観察を${observations.length}件保存`,documents:d=>({...d,observations:{...(d.observations as object??{}),...Object.fromEntries(observations.map(o=>[o.id,o]))}})});
+  return {...result,observations};
 }
 export function measureEvents(id:string,input:z.infer<typeof MeasureRequest>) {
   const {project,scene}=current(id,input.baseRevision);
@@ -55,7 +76,21 @@ export function saveModel(id:string,input:z.infer<typeof ModelRequest>) {
   }
   for(const h of input.hypotheses) for(const key of h.observationIds) if(!observations[key]) throw new HttpError(422,`観察 ${key} がありません`);
   for(const rule of input.rules) {
-    if(!input.hypotheses.some(h=>h.id===rule.hypothesisId && h.status==='accepted')) throw new HttpError(422,'規則にはacceptedの仮説が必要です（採用は真偽の証明ではありません）');
+    const hypothesis=input.hypotheses.find(h=>h.id===rule.hypothesisId && h.status==='accepted');
+    if(!hypothesis) throw new HttpError(422,'規則にはacceptedの仮説が必要です（採用は真偽の証明ではありません）');
+    if(rule.kind==='event_timing') {
+      const design=BlockingSchema.safeParse(docs);
+      const event=design.success&&design.data.events.find(event=>event.id===rule.eventId&&event.status==='confirmed');
+      if(!event||!(rule.from<event.t&&event.t<rule.to&&rule.to<=scene.duration)||!event.observationIds.some(id=>hypothesis.observationIds.includes(id))) {
+        throw new HttpError(422,'時刻規則には確定時刻、その前後の区間、仮説が参照する観察が必要です');
+      }
+      continue;
+    }
+    if(rule.kind==='glyph_combine') {
+      if(!hypothesis.observationIds.includes(rule.observationId)) throw new HttpError(422,'合字規則には仮説が参照する文字構成の観察が必要です');
+      applyGlyphRule(scene,docs,rule,0);
+      continue;
+    }
     if(rule.kind==='hold_group') {
       try { varyHoldGroup(scene,rule.targets,0); } catch(err) {throw new HttpError(422,String(err));}
       continue;
@@ -69,6 +104,20 @@ export function saveModel(id:string,input:z.infer<typeof ModelRequest>) {
     }
   }
   return commit(id,{baseRevision:input.baseRevision,actor:input.actor,note:'観察に紐づく仮説・規則を保存',documents:d=>({...d,hypotheses:input.hypotheses,motion_rules:{rules:input.rules,sceneSha256:fingerprint(scene),sourceRevision:input.baseRevision}})});
+}
+function applyGlyphRule(scene:Scene,docs:ProjectDocuments,rule:Extract<z.infer<typeof Rule>,{kind:'glyph_combine'}>,gap:number,offset=0,reverse=false) {
+  const observations=docs.observations as Record<string,unknown>|undefined;
+  const claim=z.object({...CombineEvidence.shape,kind:z.literal('glyph-structure')}).safeParse(observations?.[rule.observationId]);
+  if(!claim.success) throw new HttpError(422,'合字の観察がありません');
+  const evidence=claim.data;
+  const {combineAt,from,to}=evidence;
+  const glyphs=[...evidence.parts,evidence.result];
+  if(combineAt===undefined || glyphs.some(g=>!scene.elements.some(e=>e.id===g.elementId&&e.type==='text'&&e.text===g.text))) throw new HttpError(422,'合字の観察に合体時刻と現在のシーンに一致する文字要素IDが必要です');
+  const partIds=evidence.parts.map(g=>g.elementId!);
+  if(Object.keys(rule.partCompanions??{}).some(id=>!partIds.includes(id))) throw new HttpError(422,'部品と付随要素の対応が不正です');
+  try {
+    return varyGlyphSequence(scene,{from,to,combineAt,partIds,resultId:evidence.result.elementId!,partCompanions:rule.partCompanions,resultCompanions:rule.resultCompanions},gap,offset,reverse);
+  } catch(err) { throw new HttpError(422,String(err)); }
 }
 function generated(name:string,scene:Scene,mediaId:string,actor:string,documents:ProjectDocuments) {
   checkScene(scene);
@@ -89,8 +138,27 @@ export function generateVariant(id:string,input:z.infer<typeof VariantRequest>) 
   const rule=saved.data.rules.find(r=>r.id===input.ruleId);
   if(!rule) throw new HttpError(422,'規則がありません');
   let next=structuredClone(scene);
+  let derived:ProjectDocuments={};
   try {
-    if(rule.kind==='hold') next=varyHold(scene,rule.elementId,rule.property,rule.keyIndex,input.seconds);
+    if(rule.kind!=='glyph_combine'&&rule.kind!=='event_timing' && (input.mergeOffsetSeconds!==undefined||input.order!==undefined)) throw new Error('合体時刻と部品順を変えられるのは合字規則です');
+    if(rule.kind==='event_timing') {
+      if(input.order!==undefined) throw new Error('出来事の時刻規則は部品順を変更しません');
+      const design=BlockingSchema.parse(docs);
+      const event=design.events.find(item=>item.id===rule.eventId&&item.status==='confirmed');
+      if(!event) throw new Error('確定した出来事がありません');
+      const nextTime=event.t+(input.mergeOffsetSeconds??input.seconds);
+      if(!(rule.from<nextTime&&nextTime<rule.to)) throw new Error('時刻を前後の区間内に収めてください');
+      const points=[0,rule.from,event.t,rule.to,scene.duration];
+      const target=[0,rule.from,nextTime,rule.to,scene.duration];
+      const elementIds=scene.elements.map(el=>el.id);
+      const sections=points.slice(1).flatMap((sourceTo,i)=>sourceTo<=points[i]?[]:[{
+        sourceFrom:points[i],sourceTo,targetFrom:target[i],targetTo:target[i+1],elementIds,reason:'観察時刻を変えた比較版',
+      }]);
+      const plan=planSectionRetiming(scene,scene,sections,false);
+      next=plan.scene;
+      derived=retimeBlocking(design,scene,plan,design.blocks.sourceSha256);
+    } else if(rule.kind==='glyph_combine') next=applyGlyphRule(scene,docs,rule,input.seconds,input.mergeOffsetSeconds,input.order==='reverse');
+    else if(rule.kind==='hold') next=varyHold(scene,rule.elementId,rule.property,rule.keyIndex,input.seconds);
     else if(rule.kind==='hold_group') next=varyHoldGroup(scene,rule.targets,input.seconds);
     else {
       const e=next.elements.find(e=>e.id===rule.elementId);
@@ -98,30 +166,63 @@ export function generateVariant(id:string,input:z.infer<typeof VariantRequest>) 
       e.stagger.interval=input.seconds;
     }
   } catch(err) {throw new HttpError(422,String(err));}
-  return generated(input.name,next,id,input.actor,{...docs,adaptation:{kind:'variant',sourceProjectId:id,sourceRevision:input.baseRevision,rule,seconds:input.seconds,limitations:['指定した規則のパラメータだけを変更。演出の優劣は未判定']}});
+  return generated(input.name,next,id,input.actor,{...docs,...derived,adaptation:{kind:'variant',sourceProjectId:id,sourceRevision:input.baseRevision,rule,seconds:input.seconds,mergeOffsetSeconds:input.mergeOffsetSeconds,order:input.order,limitations:['指定した規則のパラメータだけを変更。演出の優劣は未判定']}});
 }
 export function generateAdaptation(id:string,input:z.infer<typeof AdaptRequest>) {
   const source=current(id,input.baseRevision),target=current(input.targetProjectId,input.targetRevision);
+  const docs=getDocuments(id);
+  let derived:ProjectDocuments={};
   let scene:Scene;
-  try {scene=retimeSections(source.scene,target.scene,input.sections);} catch(err) {throw new HttpError(422,String(err));}
-  return generated(input.name,scene,input.targetProjectId,input.actor,{...getDocuments(id),adaptation:{kind:'sections',sourceProjectId:id,sourceRevision:input.baseRevision,targetProjectId:input.targetProjectId,targetRevision:input.targetRevision,sourceSha256:source.project.source?.sha256,targetSha256:target.project.source?.sha256,sections:input.sections,beatMapping:'区間先頭に最も近い新曲の拍から拍番号を対応。揺れはoffsetSecondsに保持',limitations:['区間対応は明示指定。楽曲構成を自動推定していない','図形と文字内容を保持。文字数変更は既存の編集操作で行う','秒キーは区間ごとに変換。区間をまたぐ補間曲線の厳密な再パラメータ化はしない','反復周期・staggerの拍数は保持するが、不規則な拍ごとの周期変化は未対応']}});
+  try {
+    const design=docs.blocks?BlockingSchema.parse(docs):undefined;
+    const reference=design?withBlockingBeatLinks(source.scene,design):source.scene;
+    const plan=planSectionRetiming(reference,target.scene,input.sections);
+    scene=plan.scene;
+    if(design) {
+      if(!target.project.source) throw new Error('工程比較を再構成するには転用先のメディアが必要です');
+      scene.fps=target.project.source.fps;
+      derived=retimeBlocking(design,reference,plan,target.project.source.sha256);
+    }
+  } catch(err) {throw new HttpError(422,String(err));}
+  return generated(input.name,scene,input.targetProjectId,input.actor,{...docs,...derived,adaptation:{kind:'sections',sourceProjectId:id,sourceRevision:input.baseRevision,targetProjectId:input.targetProjectId,targetRevision:input.targetRevision,sourceSha256:source.project.source?.sha256,targetSha256:target.project.source?.sha256,sections:input.sections,beatMapping:'区間先頭に最も近い新曲の拍から拍番号を対応。揺れはoffsetSecondsに保持',limitations:['区間対応は明示指定。楽曲構成を自動推定していない','図形と文字内容を保持。文字数変更は既存の編集操作で行う','秒キーは区間ごとに変換。区間をまたぐ補間曲線の厳密な再パラメータ化はしない','反復周期・staggerの拍数は保持するが、不規則な拍ごとの周期変化は未対応']}});
 }
 
 export function generateBaselines(id:string,input:z.infer<typeof BaselineRequest>) {
   const source=current(id,input.baseRevision),target=current(input.targetProjectId,input.targetRevision);
-  const map=(scene:Scene,sourceFrom:number,sourceTo:number,targetFrom:number,targetTo:number,reason:string)=>retimeSections(scene,target.scene,[{sourceFrom,sourceTo,targetFrom,targetTo,elementIds:scene.elements.map(e=>e.id),reason}],false);
+  const docs=getDocuments(id);
+  const reference=docs.blocks?BlockingSchema.parse(docs):undefined;
+  const map=(scene:Scene,sourceFrom:number,sourceTo:number,targetFrom:number,targetTo:number,reason:string)=>planSectionRetiming(scene,target.scene,[{sourceFrom,sourceTo,targetFrom,targetTo,elementIds:scene.elements.map(e=>e.id),reason}],false);
   const beats=(s:Scene)=>[...new Set((s.markers??[]).filter(m=>m.kind==='beat'&&m.t>=0&&m.t<=s.duration).map(m=>m.t))].sort((a,b)=>a-b);
   const a=beats(source.scene),b=beats(target.scene);
   if(a.length<2||b.length<2) throw new HttpError(422,'拍基準の比較版には両方のシーンに2拍以上必要です');
-  let candidates:{kind:string;scene:Scene;reason:string}[];
+  let candidates:{kind:string;plan:ReturnType<typeof planSectionRetiming>;reason:string;documents?:ProjectDocuments}[];
   try {
     const template=demoScene();
     candidates=[
-      {kind:'global-speed',scene:map(source.scene,0,source.scene.duration,0,target.scene.duration,'全体尺だけを合わせる'),reason:'全体尺の比率で時間を一律変更'},
-      {kind:'beat-endpoints',scene:map(source.scene,a[0],a.at(-1)!,b[0],b.at(-1)!,'最初と最後の拍を合わせる'),reason:'最初と最後の拍だけを対応させる一定倍率の基準。各拍の局所補正はしない'},
-      {kind:'fixed-template',scene:map(template,0,template.duration,0,target.scene.duration,'固定demoテンプレート'),reason:'参考映像に依存しない固定テンプレートの全体尺を合わせる'},
+      {kind:'global-speed',plan:map(source.scene,0,source.scene.duration,0,target.scene.duration,'全体尺だけを合わせる'),reason:'全体尺の比率で時間を一律変更'},
+      {kind:'beat-endpoints',plan:map(source.scene,a[0],a.at(-1)!,b[0],b.at(-1)!,'最初と最後の拍を合わせる'),reason:'最初と最後の拍だけを対応させる一定倍率の基準。各拍の局所補正はしない'},
+      {kind:'fixed-template',plan:map(template,0,template.duration,0,target.scene.duration,'固定demoテンプレート'),reason:'参考映像に依存しない固定テンプレートの全体尺を合わせる'},
     ];
-    candidates.forEach(c=>checkScene(c.scene));
+    if(input.includeLocalBeat) {
+      const points:[number,number][]=[[0,0]];
+      for(const [i,t] of a.entries()) {
+        const fractional=i*(b.length-1)/(a.length-1), index=Math.floor(fractional);
+        const next=b[index]+(fractional-index)*((b[index+1]??b[index])-b[index]);
+        if(t>points.at(-1)![0]+1e-8&&next>points.at(-1)![1]+1e-8&&t<source.scene.duration-1e-8&&next<target.scene.duration-1e-8) points.push([t,next]);
+      }
+      points.push([source.scene.duration,target.scene.duration]);
+      const elements=source.scene.elements.map(e=>e.id);
+      const sections=points.slice(1).map(([sourceTo,targetTo],i)=>({sourceFrom:points[i][0],sourceTo,targetFrom:points[i][1],targetTo,elementIds:elements,reason:'基準の局所拍合わせ'}));
+      candidates.push({kind:'local-beats',plan:planSectionRetiming(source.scene,target.scene,sections,false),reason:'内側の拍を対応させた区間ごとの速度変更。演出規則は適用しない'});
+    }
+    for(const candidate of candidates) {
+      if(target.project.source) candidate.plan.scene.fps=target.project.source.fps;
+      if(reference&&candidate.kind!=='fixed-template') {
+        if(!target.project.source) throw new Error('工程の比較基準には転用先のメディアが必要です');
+        candidate.documents={...retimeBlocking(reference,source.scene,candidate.plan,target.project.source.sha256),observations:docs.observations};
+      }
+      checkScene(candidate.plan.scene);
+    }
   } catch(err) {throw new HttpError(422,'比較用シーンを生成できません',String(err));}
-  return {projects:candidates.map(c=>generated(`${input.name} ${c.kind}`,c.scene,input.targetProjectId,input.actor,{adaptation:{kind:c.kind,reason:c.reason,sourceProjectId:id,sourceRevision:input.baseRevision,targetProjectId:input.targetProjectId,targetRevision:input.targetRevision}}))};
+  return {projects:candidates.map(c=>generated(`${input.name} ${c.kind}`,c.plan.scene,input.targetProjectId,input.actor,{...c.documents,adaptation:{kind:c.kind,reason:c.reason,sourceProjectId:id,sourceRevision:input.baseRevision,targetProjectId:input.targetProjectId,targetRevision:input.targetRevision}}))};
 }

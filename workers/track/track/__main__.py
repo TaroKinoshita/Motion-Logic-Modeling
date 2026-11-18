@@ -79,18 +79,29 @@ def main():
     parser.add_argument('--region', type=int, nargs=4, required=True)
     parser.add_argument('--start-time', type=float, default=0)
     parser.add_argument('--fps', type=float, required=True)
-    parser.add_argument('--fit-output', help='Separate JSON file for proposed linear keys')
+    parser.add_argument('--fit-output', help='Separate JSON file for proposed motion keys')
+    parser.add_argument('--method', choices=('features', 'silhouette'), default='features')
+    parser.add_argument('--polarity', choices=('dark','light'), default='dark')
+    parser.add_argument('--threshold', type=int, choices=range(1,255), default=125)
     args = parser.parse_args()
     if args.fit_output and Path(args.fit_output).resolve() == Path(args.output).resolve():
         raise ValueError('Observation and fitted keys require different files')
-    result = track(args.video, args.region, args.start_time, args.fps)
+    if args.method == 'silhouette':
+        from .silhouette import track_silhouette
+        result = track_silhouette(args.video, args.region, args.start_time, args.fps, args.polarity, args.threshold)
+    else:
+        result = track(args.video, args.region, args.start_time, args.fps)
     with open(args.video, 'rb') as source:
         result['inputSha256'] = hashlib.file_digest(source, 'sha256').hexdigest()
     target = Path(args.output); temp = target.with_suffix('.tmp')
     temp.write_text(json.dumps(result, allow_nan=False), encoding='utf-8'); temp.replace(target)
     if args.fit_output:
-        from .fit import fit_track
-        fit = fit_track(result['samples'])
+        if args.method == 'silhouette':
+            from .easing import fit_eased_track
+            fit = fit_eased_track(result['samples'])
+        else:
+            from .fit import fit_track
+            fit = fit_track(result['samples'])
         fit['observationSha256'] = hashlib.sha256(target.read_bytes()).hexdigest()
         fitted = Path(args.fit_output); fit_temp = fitted.with_suffix('.tmp')
         fit_temp.write_text(json.dumps(fit, allow_nan=False), encoding='utf-8'); fit_temp.replace(fitted)

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ElementSchema } from '@mlm/core';
+import { ElementSchema, snapElementTimesOps } from '@mlm/core';
 import type { HistoryEntry, SceneOp } from '@mlm/core';
 import { api } from './api.ts';
 import type { ProjectData } from './api.ts';
@@ -131,7 +131,23 @@ export function Inspector({ data, history, selectedId, onApply, onAddRect, onSel
         </h3>
         {selected ? (
           <>
+            <div className="line">
+              <button onClick={()=>void onApply(snapElementTimesOps(scene,selected.id,'frame'),'選択要素の秒時刻をフレーム境界へ吸着')}>時刻→フレーム</button>
+              <button title="±1フレーム以内のカットへ秒指定のキーと表示区間を合わせる。拍指定は保持。" onClick={()=>void onApply(snapElementTimesOps(scene,selected.id,'cut'),'選択要素の秒時刻を近くのカットへ吸着')}>時刻→近くのカット</button>
+            </div>
             {selected.type === 'text' && <div className="line">
+              <label>書体 <select value={selected.fontFamily??''} onChange={e=>{
+                const element={...selected};
+                if(e.target.value) element.fontFamily=e.target.value; else delete element.fontFamily;
+                void onApply([{op:'upsertElement',element}],'書体を変更');
+              }}><option value="">既定</option>{[...new Set(Array.from(document.fonts).filter(font=>font.status==='loaded'&&font.weight===String(selected.fontWeight??700)).map(font=>font.family))].map(family=><option key={family} value={family}>{family.replace(/^MLM /,'')}</option>)}</select></label>
+              <form className="line" key={`spacing-${selected.id}-${project.revision}`} onSubmit={e=>{
+                e.preventDefault();
+                const raw=new FormData(e.currentTarget).get('spacing');
+                if(typeof raw!=='string'||raw==='') return;
+                const letterSpacing=Number(raw);
+                if(Number.isFinite(letterSpacing)&&letterSpacing!==(selected.letterSpacing??0)) void onApply([{op:'patchElement',id:selected.id,patch:{letterSpacing,split:selected.split??'char'}}],'字間を変更（未分割は文字分割へ）');
+              }}><label>字間(px)<input name="spacing" type="number" step="any" defaultValue={selected.letterSpacing??0}/></label><button type="submit">字間を適用</button></form>
               <label>分割 <select value={selected.split ?? ''} onChange={e => {
                 const element = { ...selected };
                 if (e.currentTarget.value) element.split = e.currentTarget.value as 'char' | 'word';

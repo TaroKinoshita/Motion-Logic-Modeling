@@ -1,5 +1,5 @@
-import type { MouseEvent, PointerEvent } from 'react';
-import { timelineKeys, resolveTime, shiftKeyTimeOps } from '@mlm/core';
+import { useState, type MouseEvent, type PointerEvent } from 'react';
+import { timelineKeys, resolveTime, shiftKeyTimeOps, snapTime } from '@mlm/core';
 import type { Scene, SceneElement, SceneOp } from '@mlm/core';
 
 export interface LoopRange {
@@ -32,6 +32,7 @@ function wavePath(peaks: number[]): string {
 
 /** 共通タイムライン。要素ごとの表示区間・キー時刻・マーカー・波形・再生位置を同じ時間軸に並べる。 */
 export function Timeline({ scene, baseScene, time, selectedId, range, peaks, onSeek, onSelect, onKeyPreview, onKeyCommit }: Props) {
+  const [snap,setSnap]=useState(false);
   const pct = (t: number) => `${(Math.min(Math.max(t, 0), scene.duration) / scene.duration) * 100}%`;
   const seekFrom = (e: MouseEvent<HTMLDivElement>) => {
     const r = e.currentTarget.getBoundingClientRect();
@@ -49,6 +50,7 @@ export function Timeline({ scene, baseScene, time, selectedId, range, peaks, onS
     let toT = fromT;
     const move = (ev: globalThis.PointerEvent) => {
       toT = Math.round(((ev.clientX - lane.left) / lane.width) * scene.duration * 1000) / 1000;
+      if(snap) toT=snapTime(baseScene,toT,'cut-frame');
       ops = shiftKeyTimeOps(baseScene, id, fromT, toT);
       onKeyPreview(ops);
     };
@@ -68,6 +70,7 @@ export function Timeline({ scene, baseScene, time, selectedId, range, peaks, onS
 
   return (
     <div className="timeline">
+      <label><input type="checkbox" checked={snap} onChange={e=>setSnap(e.target.checked)}/>キーのドラッグをカット・フレームへ吸着</label>
       <div className="row ruler">
         <div className="name" />
         <div className="lane" onMouseDown={seekFrom} onMouseMove={(e) => e.buttons === 1 && seekFrom(e)}>
