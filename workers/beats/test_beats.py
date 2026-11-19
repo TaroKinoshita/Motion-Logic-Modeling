@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 import numpy as np
 import soundfile as sf
-from beats.__main__ import analyze, structure_candidates
+from beats.__main__ import analyze, portable_beats, structure_candidates
 
 
 class AudioBoundaryTests(unittest.TestCase):
@@ -31,6 +31,16 @@ class AudioBoundaryTests(unittest.TestCase):
     def test_empty_audio_is_rejected(self):
         with self.assertRaises(ValueError):
             self.run_audio(np.array([]))
+
+    def test_portable_beat_path_tracks_regular_onsets(self):
+        sr, hop = 22050, 256
+        period = round(sr / hop / 2)
+        envelope = np.zeros(period * 12)
+        envelope[10::period] = 1
+        bpm, beats = portable_beats(envelope, sr, hop)
+        self.assertAlmostEqual(bpm, 120, delta=1)
+        self.assertGreaterEqual(len(beats), 10)
+        self.assertLessEqual(float(np.max(np.abs(np.diff(beats) - period * hop / sr))), hop / sr)
 
     def test_accent_phase_and_tone_change_are_candidates(self):
         sr, hop = 22050, 256

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { blockingFrame, emptyScene, evaluateScene, localMatrix, validateBlocking } from '../src/index.ts';
+import { blockingFrame, emptyScene, evaluateScene, localMatrix, validateBlocking, withBlockingBeatLinks } from '../src/index.ts';
 import type { Blocking, Scene } from '../src/index.ts';
 
 const scene: Scene = {...emptyScene(),duration:2,elements:[
@@ -48,4 +48,16 @@ test('a confirmed replacement requires an end and a new start at the same time',
   assert.throws(()=>validateBlocking(next,replacement),/寿命が一致しません/);
   next.elements[0]={...next.elements[0],outPoint:1.5};
   assert.doesNotThrow(()=>validateBlocking(next,replacement));
+});
+
+test('a beat-linked event keeps the matching transform key editable',()=>{
+  const marked:Scene={...scene,markers:[{t:0,kind:'beat'},{t:1,kind:'beat'}]};
+  const next=withBlockingBeatLinks(marked,{...design,events:[
+    {id:'cue',kind:'appear',status:'confirmed',beatRelative:true,t:1,label:'cue',inputs:[],outputs:['parent'],observationIds:[]},
+  ]});
+  const x=next.elements[0].transform?.x;
+  assert.ok(typeof x==='object');
+  assert.equal(x.keys[0].t,0);
+  assert.deepEqual(x.keys[1].t,{beat:1});
+  assert.equal(evaluateScene(blockingFrame(next,design,1,'final'),1)[0].cx,200);
 });

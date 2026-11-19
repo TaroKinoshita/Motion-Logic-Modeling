@@ -82,11 +82,19 @@ export const api = {
     {operation:'apply-orientation';observationId:string;shapeFrame:number;partIds:string[]}))=>
     post<ProjectData>(`/api/projects/${id}/blocking/timing`,{...body,baseRevision}),
   documents: (id:string)=>request<{observations?:Record<string,unknown>;hypotheses?:unknown;motion_rules?:unknown;adaptation?:unknown;
-    style_study?:{works:Record<string,unknown>[];claims:Record<string,unknown>[]}}>(`/api/projects/${id}/documents`),
+    style_study?:{works:Record<string,unknown>[];claims:Record<string,unknown>[]};
+    motion_vocabulary?:Record<string,{id:string;label:string;kind:string;cubicKeyCount:number;sampleKeyCount:number}>}>(`/api/projects/${id}/documents`),
   runModel: (id:string,operation:'measure-events'|'observe-glyphs'|'model'|'variant'|'music'|'adapt'|'adapt-baselines',body:unknown)=>
     post<ProjectData>(`/api/projects/${id}/${operation}`,body),
   generateBaselines: (id:string,body:unknown)=>post<{projects:ProjectData[]}>(`/api/projects/${id}/adapt-baselines`,body),
   saveStyleStudy: (id:string,body:unknown)=>post<ProjectData>(`/api/projects/${id}/style-study`,body),
+  passages: (id:string)=>request<{revision:number;candidates:PassageCandidate[];reviews:PassageReview[]}>(`/api/projects/${id}/passages`),
+  editPassage: (id:string,body:unknown)=>post<ProjectData>(`/api/projects/${id}/passages`,body),
   generateRulePair: (id:string,body:unknown)=>post<{variants:{label:string;project:ProjectMeta}[];reveal:{withRule:string;withoutRule:string}}>(`/api/projects/${id}/variant-pair`,body),
   generateLyricStudy: (id:string,body:unknown)=>post<{variants:{label:string;project:ProjectMeta}[];reveal:Record<string,string>}>(`/api/projects/${id}/lyric-study`,body),
+  saveMotionVocabulary: (id:string,body:unknown)=>post<ProjectData>(`/api/projects/${id}/motion-vocabulary`,body),
 };
+
+export type PassageCandidate={id:string;pattern:'sequential-entry'|'common-translation';from:number;to:number;blockIds:string[];
+  observationIds:string[];metrics:Record<string,number>};
+export type PassageReview=PassageCandidate&{candidateId:string;status:'confirmed'|'rejected';note:string};

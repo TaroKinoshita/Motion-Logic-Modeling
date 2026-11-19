@@ -18,6 +18,9 @@ interface Props {
 export function BlockingStage({scene,design,time,videoRef,videoUrl,onSeek,children}:Props) {
   const [view,setView]=useState<View>('all');
   const isVisible=(pane: keyof typeof titles)=>view==='all'||view===pane;
+  const firstFrame=Math.round(design.blocks.from*scene.fps);
+  const lastFrame=Math.max(firstFrame,Math.round(design.blocks.to*scene.fps)-1);
+  const frame=Math.min(lastFrame,Math.max(firstFrame,Math.floor(time*scene.fps+1e-7)));
   return <section className="blocking-stage" aria-label="工程比較">
     <nav className="blocking-tabs" aria-label="比較する工程">
       <button type="button" aria-pressed={view==='all'} onClick={()=>setView('all')}>4画面</button>
@@ -36,8 +39,8 @@ export function BlockingStage({scene,design,time,videoRef,videoUrl,onSeek,childr
       </figure>)}
     </div>
     <label className="blocking-scrub">比較区間
-      <input type="range" aria-label="比較区間の再生位置" min={design.blocks.from} max={design.blocks.to-1/scene.fps} step={1/scene.fps}
-        value={Math.min(design.blocks.to-1/scene.fps,Math.max(design.blocks.from,time))} onChange={event=>onSeek(Number(event.currentTarget.value))}/>
+      <input type="range" aria-label="比較区間の再生位置" aria-valuetext={`${frame}F`} min={firstFrame} max={lastFrame} step={1}
+        value={frame} onChange={event=>onSeek(Number(event.currentTarget.value)/scene.fps)}/>
     </label>
     {design.blocks.measuredTo!==undefined&&design.blocks.measuredTo<design.blocks.to&&
       <p className="blocking-provenance">{Math.round(design.blocks.from*scene.fps)}〜{Math.round(design.blocks.measuredTo*scene.fps)-1}F は元映像から計測。以降の動きは既存シーンから補完。</p>}
@@ -51,7 +54,7 @@ export function BlockingStage({scene,design,time,videoRef,videoUrl,onSeek,childr
 
 export function activeBlocks(scene:Scene,design:Blocking,t:number) {
   const groups=new Set(scene.elements.filter(el=>el.type==='group'&&isActive(el,scene,t)).map(el=>el.id));
-  return design.blocks.items.filter(block=>groups.has(block.id));
+  return design.blocks.items.filter(block=>groups.has(block.id)&&!block.hiddenDuring?.some(gap=>t>=gap.from&&t<gap.to));
 }
 
 function BlockingCanvas({scene,design,time,view}:{scene:Scene;design:Blocking;time:number;view:BlockingView}) {

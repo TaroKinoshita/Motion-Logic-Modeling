@@ -20,10 +20,11 @@ export function getBlocking(id:string) {
 export async function exportBlocking(id:string, cellWidth=960,signal?:AbortSignal,onProgress?:(value:number)=>void) {
   const {project,scene,design}=getBlocking(id);
   if(!project.source||!design) throw new HttpError(400,'ブロック比較のあるプロジェクトを指定してください');
-  const {from,to}=design.blocks;
   const {fps,frameRate}=project.source;
-  const startFrame=Math.round(from*fps),endFrame=Math.round(to*fps);
-  if(endFrame<=startFrame||Math.abs(startFrame/fps-from)>1e-7||Math.abs(endFrame/fps-to)>1e-7) throw new HttpError(422,'比較範囲は元動画のフレーム境界で指定してください');
+  const startFrame=Math.round(design.blocks.from*fps),endFrame=Math.round(design.blocks.to*fps);
+  const from=startFrame/fps,to=endFrame/fps;
+  // ffprobe reports durations rounded to microseconds, including exact frame endpoints.
+  if(endFrame<=startFrame||Math.abs(from-design.blocks.from)>1e-6||Math.abs(to-design.blocks.to)>1e-6) throw new HttpError(422,'比較範囲は元動画のフレーム境界で指定してください');
   const width=Math.round(cellWidth/2)*2;
   const height=Math.round(width*scene.height/scene.width/2)*2;
   const band=40;

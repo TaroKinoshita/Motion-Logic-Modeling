@@ -113,7 +113,7 @@ export async function createSequenceModel(id:string,input:{baseRevision:number;a
       const inPoint=index===0?group.inPoint:pose.fromFrame/scene.fps;
       const outPoint=samples[end]?.t??group.outPoint;
       const outline:SceneElement={...child,id:index===0?child.id:`${child.id}:pose:${index+1}`,inPoint,outPoint,
-        outline:appearance.paths,fill:`#${shade.repeat(3)}`,width,height};
+        outline:appearance.paths,fill:appearance.color??`#${shade.repeat(3)}`,width,height};
       if(index===0) Object.assign(child,outline);
       else {
         next.elements.push(outline);

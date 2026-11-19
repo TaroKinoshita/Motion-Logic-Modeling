@@ -12,14 +12,24 @@ from scipy.optimize import linear_sum_assignment
 from blocking_sample import Recognizer
 
 
-def extract(frame, offset=(0, 0), background=None):
+def extract(frame, offset=(0, 0), background=None, profile="luma"):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     border = np.concatenate((gray[0, :], gray[-1, :], gray[:, 0], gray[:, -1]))
     if background is None:
         background = int(np.median(border))
     dark = background >= 128
     difference = cv2.subtract(background, gray) if dark else cv2.subtract(gray, background)
-    mask = cv2.threshold(difference, 24, 255, cv2.THRESH_BINARY)[1]
+    if profile == "flat-color":
+        color_edges = np.concatenate((frame[0], frame[-1], frame[:, 0], frame[:, -1]))
+        backdrop = tuple(float(value) for value in np.median(color_edges, axis=0))
+        channel_diff = cv2.absdiff(frame, (*backdrop, 0.0))
+        difference = channel_diff.max(axis=2)
+    if profile == "type-only":
+        # Keep high-contrast marks on the footage's dark field. Low-contrast
+        # texture and small isolated flashes have no place in this model.
+        mask = cv2.inRange(gray, max(70, background + 50), 255)
+    else:
+        mask = cv2.threshold(difference, 24, 255, cv2.THRESH_BINARY)[1]
     contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
     if hierarchy is None:
         return background, []
@@ -31,6 +41,8 @@ def extract(frame, offset=(0, 0), background=None):
         area = cv2.contourArea(contour)
         if area < 3 or area > gray.size * .65:
             continue
+        if profile == "type-only" and (area < 10 or max(w, h) < 7 or min(w, h) < 2):
+            continue
         holes = []
         child = hierarchy[0][index][2]
         while child >= 0:
@@ -38,12 +50,30 @@ def extract(frame, offset=(0, 0), background=None):
             child = hierarchy[0][child][0]
         inner = gray[y:y + h, x:x + w][mask[y:y + h, x:x + w] > 0]
         ink = int(np.percentile(inner, 22 if dark else 78))
+        color = None
+        if profile == "flat-color":
+            local = np.zeros((h, w), dtype=np.uint8)
+            origin = np.array([x, y])
+            cv2.drawContours(local, [contour - origin], 0, 255, cv2.FILLED)
+            for hole in holes:
+                cv2.drawContours(local, [hole - origin], 0, 0, cv2.FILLED)
+            selected = ((local != 0) & (mask[y:y+h, x:x+w] != 0))
+            if np.any(selected):
+                pixels = frame[y:y+h, x:x+w][selected]
+                if len(pixels) > 256:
+                    pixels = pixels[::max(1, len(pixels) // 256)]
+                rgb = np.median(pixels, axis=0).astype(int)[::-1]
+                color = "#" + "".join(f"{channel:02x}" for channel in rgb)
         detections.append({
             "box": [x + offset[0], y + offset[1], w, h],
             "center": np.array([x + w / 2 + offset[0], y + h / 2 + offset[1]]),
             "parts": [contour, *holes],
-            "ink": ink,
+            "ink": 246 if profile == "type-only" else ink,
+            "color": color,
             "area": area,
+            "frame_outline": profile == "framed-type" and any(
+                cv2.contourArea(hole) >= .48 * area for hole in holes
+            ),
         })
     return background, detections
 
@@ -59,6 +89,8 @@ def group_components(parts):
             dy = max(0, gy - y - h, y - gy - gh)
             overlap_x = min(x + w, gx + gw) - max(x, gx)
             overlap_y = min(y + h, gy + gh) - max(y, gy)
+            if group["frame_outline"] and overlap_x >= .8 * w and overlap_y >= .8 * h:
+                continue
             near = max(dx, dy) <= min(10, .13 * min(max(w, h), max(gw, gh)))
             aligned = overlap_x > min(w, gw) * .4 or overlap_y > min(h, gh) * .6
             if near and aligned and (w * h > 40 or (dx == 0 and dy == 0)):
@@ -115,6 +147,8 @@ def main():
     args = parser.parse_args()
     conf = json.loads(args.config.read_text(encoding="utf-8")) if args.config else {}
     bounds = conf.get("region")
+    profile = conf.get("profile", "luma")
+    cv2.setNumThreads(2)
     offset = tuple(bounds[:2]) if bounds else (0, 0)
     cuts = set(conf.get("cuts", []))
     ocr_frames = set(conf.get("ocrFrames", []))
@@ -138,9 +172,11 @@ def main():
                 gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
                 background = int(np.median(np.concatenate((gray[0], gray[-1], gray[:,0], gray[:,-1]))))
                 x, y, w, h = bounds
-                _, parts = extract(image[y:y + h, x:x + w], offset, background)
+                _, parts = extract(image[y:y + h, x:x + w], offset, background, profile)
             else:
-                background, parts = extract(image)
+                background, parts = extract(image, profile=profile)
+            if profile == "type-only":
+                background = 16
             backgrounds.append(background)
             visible = conf.get("from", 0) <= frame < conf.get("to", float("inf"))
             detections = group_components(parts) if visible else []
@@ -155,6 +191,8 @@ def main():
                     continue
                 track = matches.get(col)
                 sample = {"frame": frame, "box": detection["box"], "paths": paths, "ink": detection["ink"]}
+                if detection["color"]:
+                    sample["color"] = detection["color"]
                 if recognizer and frame in ocr_frames and detection["area"] >= 350:
                     sample["ocr"] = recognizer.recognize(image, detection["box"])
                 if track is None:

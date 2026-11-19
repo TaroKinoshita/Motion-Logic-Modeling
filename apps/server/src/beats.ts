@@ -22,7 +22,16 @@ export async function detectBeats(id: string, baseRevision: number, actor: strin
   try {
     await run(process.env.MLM_FFMPEG ?? 'ffmpeg', ['-v', 'error', '-y', '-i', sourcePath(project), '-vn', '-ac', '1', '-ar', '22050', wav], { windowsHide: true, timeout: 120000 });
     // Deployment/setup installs dependencies. Analysis itself never downloads them.
-    await run(process.env.MLM_UV ?? 'uv', ['run', '--offline', '--frozen', '--project', path.join(REPO_ROOT, 'workers/beats'), '--directory', path.join(REPO_ROOT, 'workers/beats'), 'python', '-m', 'beats', wav, json], { windowsHide: true, timeout: 180000, maxBuffer: 4 * 1024 * 1024 });
+    const worker=path.join(REPO_ROOT,'workers/beats');
+    const command=['run','--offline','--frozen','--project',worker,'--directory',worker,'python','-m','beats',wav,json];
+    const options={windowsHide:true,timeout:180_000,maxBuffer:4*1024*1024};
+    try {
+      await run(process.env.MLM_UV??'uv',command,options);
+    } catch(error) {
+      // Numba's native beat DP can fault on some finite real-audio envelopes on Windows.
+      if(process.platform!=='win32'||![-1073741819,3221225477].includes(Number((error as {code?:unknown}).code))) throw error;
+      await run(process.env.MLM_UV??'uv',[...command,'--portable'],options);
+    }
     const analysis = Result.parse(JSON.parse(fs.readFileSync(json, 'utf8')));
     if ([...analysis.beats,...analysis.downbeats,...analysis.sectionBoundaries].some(t => t >= analysis.duration)) throw new Error('解析時刻が音声範囲外です');
     const estimates=[

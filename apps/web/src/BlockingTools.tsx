@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { sampleTrack } from '@mlm/core';
+import { resolveTime, sampleTrack } from '@mlm/core';
 import type { Blocking, ProjectMeta, Scene } from '@mlm/core';
 import { api } from './api.ts';
-import type { BlockJob } from './api.ts';
+import type { BlockJob, PassageCandidate } from './api.ts';
 import { activeBlocks } from './BlockingStage.tsx';
 
 type Props={
@@ -68,7 +68,9 @@ export function BlockingTools({design,scene,id,revision,time,job,onJob,onRefresh
         const kind=(e.nativeEvent as SubmitEvent).submitter?.getAttribute('data-kind');
         if(kind==='ungroup') void apply({kind,blockId:block.id});
         else if(kind==='split') void apply({kind,blockId:block.id,frame});
-        else if(kind==='text') void apply({kind,blockId:block.id,frame,text:fields.get('text')});
+        else if(kind==='text') void apply({kind,blockId:block.id,frame,text:fields.get('text'),
+          reading:fields.has('removeRuby')?null:String(fields.get('reading')??'').trim()||undefined,
+          readingPosition:String(fields.get('readingPosition')??'')||undefined,rubySourceIds:fields.getAll('oldRuby').map(String)});
         else if(kind==='analyze'||kind==='crop'||kind==='sprite') {
           const {left,top,roiWidth,roiHeight,from,to}=fieldsOf(['left','top','roiWidth','roiHeight','from','to']);
           if(kind==='crop') {
@@ -96,8 +98,17 @@ export function BlockingTools({design,scene,id,revision,time,job,onJob,onRefresh
         </div>
         <div className="blocking-fields">
           <label>文字 <input name="text" placeholder="例：飯" maxLength={120}/></label>
+          <label>読み <input name="reading" placeholder="例：めし" maxLength={120}/></label>
+          <label>読みの位置 <select name="readingPosition"><option value="">現在値（初回は下）</option>
+            <option value="below">下</option><option value="above">上</option><option value="right">右</option></select></label>
+          <label><input type="checkbox" name="removeRuby"/>読みを消す</label>
           <button disabled={pending} data-kind="text">外観を文字へ置換</button>
         </div>
+        {blocks.length>1&&<details><summary>元動画から追跡した旧ルビを非表示にする</summary>
+          <label>旧ルビのブロック <select multiple name="oldRuby" size={4}>
+            {blocks.filter(item=>item.id!==block.id&&!item.members).map(item=><option key={item.id} value={item.id}>{item.label} · {item.id}</option>)}
+          </select></label>
+        </details>}
         <div className="blocking-fields">
           {numberField('left','再計測 左',Math.round(Math.max(0,value(group.transform?.x)-value(block.extent.width)/2-16)),0,1)}
           {numberField('top','上',Math.round(Math.max(0,value(group.transform?.y)-value(block.extent.height)/2-16)),0,1)}
@@ -140,6 +151,22 @@ export function BlockingTools({design,scene,id,revision,time,job,onJob,onRefresh
           <button disabled={pending}>代表形を別プロジェクトに保存</button>
         </form>
       </details>}
+      {block&&group&&(()=>{
+        const boundary=resolveTime(group.outPoint??scene.duration,scene.tempo);
+        const next=design.blocks.items.filter(item=>!item.members&&item.id!==block.id&&scene.elements.some(element=>element.id===item.id&&
+          element.parentId===group.parentId&&Math.abs(resolveTime(element.inPoint??0,scene.tempo)-boundary)<1e-8));
+        if(!next.length) return null;
+        return <details><summary>同じ対象の次の軌道を接続</summary>
+          <form className="blocking-fields" onSubmit={event=>{
+            event.preventDefault();
+            void apply({kind:'join-tracks',firstId:block.id,secondId:new FormData(event.currentTarget).get('next')});
+          }}>
+            <label>{Math.round(boundary*scene.fps)}Fからの軌道 <select name="next" required><option value="">選択</option>
+              {next.map(item=><option key={item.id} value={item.id}>{item.label} · {item.id}</option>)}</select></label>
+            <button disabled={pending}>確認済みの軌道を接続</button>
+          </form>
+        </details>;
+      })()}
       {blocks.length>1&&<details><summary>複数のブロックをまとめる</summary>
         <form className="blocking-fields" onSubmit={e=>{
           e.preventDefault();
@@ -224,6 +251,8 @@ export function BlockingTools({design,scene,id,revision,time,job,onJob,onRefresh
         </div>}
       </details>
       <StyleStudy {...{id,revision,documents,projects,onRefresh,onError}}/>
+      <PassageStudy {...{id,revision,scene,design,onSeek,onRefresh,onError}}/>
+      <MotionVocabulary {...{id,revision,documents,onRefresh,onError,scene,design,frame}} blockId={block?.id}/>
       <GlyphEvidenceForm {...{id,revision,time,onRefresh,onError}}/>
       {!!documents?.style_study?.claims.length&&<LyricStudy {...{id,revision,documents,projects,onError}}/>}
       <AdaptOptions id={id} revision={revision} scene={scene} projects={projects} onError={onError}/>
@@ -233,6 +262,101 @@ export function BlockingTools({design,scene,id,revision,time,job,onJob,onRefresh
 }
 
 type ModelDocuments=Awaited<ReturnType<typeof api.documents>>;
+const passageNames={'sequential-entry':'順次出現','common-translation':'共通移動'};
+function PassageStudy({id,revision,scene,design,onSeek,onRefresh,onError}:Pick<Props,'id'|'revision'|'scene'|'design'|'onSeek'|'onRefresh'|'onError'>) {
+  const [open,setOpen]=useState(false);
+  const [rows,setRows]=useState<Awaited<ReturnType<typeof api.passages>>|null>(null);
+  const [selected,setSelected]=useState('');
+  const [busy,setBusy]=useState(false);
+  const [generated,setGenerated]=useState<string>();
+  useEffect(()=>{
+    if(!open) return;
+    let current=true;
+    void api.passages(id).then(data=>{if(current) setRows(data);}).catch(error=>{if(current) onError(error);});
+    return ()=>{current=false;};
+  },[id,revision,open,onError]);
+  const current=rows?.revision===revision?rows:null;
+  const candidate=current?.candidates.find(item=>item.id===selected)??current?.candidates[0];
+  const latest=new Map(current?.reviews.map(row=>[row.candidateId,row]));
+  const accepted=[...latest.values()].filter(row=>row.status==='confirmed');
+  const show=(row:PassageCandidate)=>`${passageNames[row.pattern]} · ${row.from}–${row.to-1}F`;
+  const apply=async(body:Record<string,unknown>,assemble=false)=>{
+    setBusy(true);
+    try {
+      const result=await api.editPassage(id,{baseRevision:revision,...body});
+      if(assemble) setGenerated(result.project.id);
+      onRefresh();
+    } catch(error) {onError(error);}
+    finally {setBusy(false);}
+  };
+  return <details onToggle={event=>setOpen(event.currentTarget.open)}><summary>演出区間の候補と差し替え</summary>
+    {current&&!candidate&&<p>計測から条件に合う候補が見つかりませんでした。</p>}
+    {candidate&&<>
+      <label>候補 <select value={candidate.id} onChange={event=>setSelected(event.target.value)}>
+        {current?.candidates.map(row=><option key={row.id} value={row.id}>{show(row)}</option>)}
+      </select></label>
+      <button type="button" onClick={()=>onSeek(candidate.from/scene.fps)}>候補の開始へ移動</button>
+      <p>{candidate.pattern==='sequential-entry'?`対象 ${candidate.metrics.roleCount}件・登場差 ${candidate.metrics.entrySpanFrames}F`:
+        `共通変位 ${candidate.metrics.dxPx.toFixed(1)}px / ${candidate.metrics.dyPx.toFixed(1)}px・支持 ${candidate.metrics.minSupport}件・残差 ${candidate.metrics.meanResidualPx.toFixed(1)}px`}</p>
+      <details><summary>観察の根拠</summary>{candidate.observationIds.join('、')}</details>
+      <form className="blocking-fields" key={`${candidate.id}:${revision}`} onSubmit={event=>{
+        event.preventDefault();
+        const data=new FormData(event.currentTarget);
+        const status=(event.nativeEvent as SubmitEvent).submitter?.getAttribute('value')??'confirmed';
+        void apply({operation:'review',candidateId:candidate.id,pattern:candidate.pattern,from:Number(data.get('from')),to:Number(data.get('to')),
+          blockIds:String(data.get('blocks')).split(/[,、\s]+/u).filter(Boolean),status,note:String(data.get('note'))});
+      }}>
+        {numberField('from','開始F',latest.get(candidate.id)?.from??candidate.from,0,1)}
+        {numberField('to','終了F（手前まで）',latest.get(candidate.id)?.to??candidate.to,1,1)}
+        <label>役割順のブロックID <input name="blocks" required defaultValue={(latest.get(candidate.id)?.blockIds??candidate.blockIds).join(',')}/></label>
+        <details><summary>ブロックID一覧</summary>{design.blocks.items.map(block=><div key={block.id}>{block.id} · {block.label}</div>)}</details>
+        <label>判定メモ <input name="note" maxLength={500} defaultValue={latest.get(candidate.id)?.note}/></label>
+        <button value="confirmed" disabled={busy}>確定</button><button value="rejected" disabled={busy}>却下</button>
+      </form>
+      {latest.get(candidate.id)&&<p>最新の判定 {latest.get(candidate.id)?.status==='confirmed'?'確定':'却下'}</p>}
+    </>}
+    {!!accepted.length&&<form className="blocking-fields" onSubmit={event=>{
+      event.preventDefault();const data=new FormData(event.currentTarget);
+      void apply({operation:'assemble',reviewId:data.get('review'),name:data.get('name'),text:data.get('text')},true);
+    }}>
+      <label>確定済みの演出 <select name="review">{accepted.map(row=><option key={row.id} value={row.id}>{show(row)} · {row.blockIds.length}文字</option>)}</select></label>
+      <label>差し替える文字 <input name="text" required maxLength={100}/></label>
+      <label>プロジェクト名 <input name="name" required maxLength={80}/></label>
+      <button disabled={busy}>役割と変形を使って生成</button>
+    </form>}
+    {generated&&<a href={`#${generated}`}>差し替え版を開く</a>}
+  </details>;
+}
+function MotionVocabulary({id,revision,documents,onRefresh,onError,scene,design,frame,blockId}:
+  Pick<Props,'id'|'revision'|'onRefresh'|'onError'|'scene'|'design'>&{documents:ModelDocuments|null;frame:number;blockId?:string}) {
+  const [saving,setSaving]=useState(false);
+  const templates=Object.values(documents?.motion_vocabulary??{});
+  return <details><summary>動きの型を抽出</summary>
+    <form className="blocking-fields" key={revision} onSubmit={async event=>{
+      event.preventDefault();
+      const data=new FormData(event.currentTarget);
+      setSaving(true);
+      try {
+        await api.saveMotionVocabulary(id,{baseRevision:revision,clips:[{id:String(data.get('id')),label:String(data.get('label')),
+          blockId:String(data.get('block')),kind:String(data.get('kind')),from:Number(data.get('from')),to:Number(data.get('to')),
+          profile:String(data.get('profile'))}]});
+        onRefresh();
+      } catch(error) {onError(error);}
+      finally {setSaving(false);}
+    }}>
+      <label>ID <input name="id" required maxLength={100}/></label>
+      <label>型の名前 <input name="label" required maxLength={100}/></label>
+      <label>ブロック <select name="block" defaultValue={blockId}>{design.blocks.items.map(item=><option value={item.id} key={item.id}>{item.label} · {item.id}</option>)}</select></label>
+      <label>種類 <select name="kind"><option value="slide">流し込み</option><option value="squash">横つぶれ</option><option value="rotate">回転</option>
+        <option value="hold">タメ</option><option value="exit">抜け</option><option value="scale-jump">語全体の瞬間縮小</option></select></label>
+      <label>近似 <select name="profile"><option value="standard">標準</option><option value="compact">誤差を広げて圧縮</option></select></label>
+      {numberField('from','開始F',frame,0,1)}
+      {numberField('to','終了F（手前まで）',Math.min(Math.round(design.blocks.to*scene.fps),frame+8),1,1)}
+      <button disabled={saving}>型を保存</button>
+    </form>
+    {templates.length>0&&<ul>{templates.map(item=><li key={item.id}>{item.label} · {item.id} · {item.sampleKeyCount}観測値から{item.cubicKeyCount}キー</li>)}</ul>}
+  </details>;
+}
 function GlyphEvidenceForm({id,revision,time,onRefresh,onError}:Pick<Props,'id'|'revision'|'time'|'onRefresh'|'onError'>) {
   const [kind,setKind]=useState<'combine'|'ruby'>('combine');
   const [saving,setSaving]=useState(false);
@@ -264,9 +388,22 @@ function LyricStudy({id,revision,documents,projects,onError}:Pick<Props,'id'|'re
   const targets=projects.filter(project=>project.source?.hasAudio);
   const [result,setResult]=useState<Awaited<ReturnType<typeof api.generateLyricStudy>>|null>(null);
   const [pending,setPending]=useState(false);
+  const [input,setInput]=useState(()=>JSON.stringify({
+    lyrics:[{text:'新しい歌詞',from:0,to:1.5}],effects:[{claimId:documents?.style_study?.claims[0]?.id,kind:'entrance'}],
+  },null,2));
+  const firstMotion=Object.keys(documents?.motion_vocabulary??{})[0];
+  const motionClaim=documents?.style_study?.claims.find(claim=>{
+    const range=claim.generation as {unit?:string;min?:number}|undefined;
+    return claim.axis==='motion'&&range?.unit==='seconds'&&typeof range.min==='number'&&range.min>=0;
+  });
+  const compoundClaim=documents?.style_study?.claims.find(claim=>{
+    const range=claim.generation as {unit?:string;min?:number;max?:number}|undefined;
+    return claim.axis==='meaning'&&range?.unit==='seconds'&&typeof range.min==='number'&&typeof range.max==='number'&&range.max>0;
+  });
   return <details><summary>新しい歌詞から規則比較を生成</summary>
     <p>歌詞の区間を秒で指定します。効果は entrance、hold、stagger、invert、combine。ルビは ruby、合字部品は parts に記録できます。</p>
     <p>観察のID {documents?.style_study?.claims.map(claim=>String(claim.id)).join('、')}</p>
+    {!!Object.keys(documents?.motion_vocabulary??{}).length&&<p>動きの型 {Object.keys(documents!.motion_vocabulary!).join('、')}。4条件を出すには comparison を motion-layout にします。行全体は motion、文字別は glyphMotion（先頭が0の index と motion）、配置は layout（x、y、sizeの画面比）で指定します。staging でタグごとに行・先頭・末尾・主役への割り当てを指定できます。</p>}
     <form onSubmit={async event=>{
       event.preventDefault();
       const data=new FormData(event.currentTarget);
@@ -282,10 +419,17 @@ function LyricStudy({id,revision,documents,projects,onError}:Pick<Props,'id'|'re
         <label>音源 <select name="target" required><option value="">選択</option>{targets.map(project=><option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
         <label>比較名 <input name="name" required maxLength={100}/></label>
       </div>
-      <textarea name="input" rows={9} aria-label="歌詞区間と使う規則 JSON" defaultValue={JSON.stringify({
-        lyrics:[{text:'新しい歌詞',from:0,to:1.5}],effects:[{claimId:documents?.style_study?.claims[0]?.id,kind:'entrance'}],
-      },null,2)}/>
-      <button disabled={pending}>全規則・規則なし・1つ省いた版を生成</button>
+      {firstMotion&&motionClaim&&<button type="button" onClick={()=>setInput(JSON.stringify({comparison:'motion-layout',
+        lyrics:[{text:'青い空',from:0,to:1.5,layout:{x:.5,y:.55,size:.22},glyphMotion:[{index:2,motion:[{id:firstMotion,duration:.45,strength:.4}]}]}],
+        effects:[{claimId:motionClaim.id,kind:'entrance'}],
+      },null,2))}>文字別の比較設定を入力</button>}
+      {compoundClaim&&<button type="button" onClick={()=>setInput(JSON.stringify({comparison:'composition-compound',
+        lyrics:[{text:'明',ruby:'めい',parts:['日','月'],from:0,to:1.5,layout:{x:.5,y:.55,size:.3,readingRatio:.14},
+          partLayouts:[{x:.34,y:.48,size:.22},{x:.67,y:.55,size:.2}],compoundShot:{delayFrames:1,layout:{x:.51,y:.59,size:.62}}}],
+        effects:[{claimId:compoundClaim.id,kind:'combine'}],
+      },null,2))}>合字と構図の比較設定を入力</button>}
+      <textarea name="input" rows={9} aria-label="歌詞区間と使う規則 JSON" value={input} onChange={event=>setInput(event.target.value)}/>
+      <button disabled={pending}>比較版を生成</button>
     </form>
     {result&&<><ul>{result.variants.map(row=><li key={row.label}><a href={`#${row.project.id}`}>比較版 {row.label}</a></li>)}</ul>
       <details><summary>条件の答え合わせ</summary><pre>{JSON.stringify(result.reveal,null,2)}</pre></details></>}
@@ -295,9 +439,15 @@ function StyleStudy({id,revision,documents,projects,onRefresh,onError}:Pick<Prop
   const [saving,setSaving]=useState(false);
   if(!documents) return null;
   const study=documents.style_study;
+  const authorCount=study?.works.filter(work=>work.group==='author').length??0;
+  const controlCount=study?.works.filter(work=>work.group==='control').length??0;
   const template={works:study?.works.map(({title:_title,sourceSha256:_sha,...entry})=>entry)??[],
     claims:study?.claims.map(({summary:_summary,...entry})=>entry)??[]};
   return <details><summary>作品をまたぐ観察の比較</summary>
+    <p>登録済み 同じ映像担当 {authorCount}作品、対照 {controlCount}作品。担当と根拠は作品ごとに確認します。</p>
+    {study&&<ul>{study.works.map(work=><li key={String(work.projectId)}>
+      <a href={`?compare=1#${String(work.projectId)}`}>{String(work.title??work.projectId)}</a> · r{String(work.revision)}
+    </li>)}</ul>}
     <p>各作品の projectId、revision、group（author または control）、credit、creditBasis を works に入力します。</p>
     <p>claims の axis に motion、timing、screen、meaning のいずれかを指定し、id、label、condition、evidence、exceptions を記録します。根拠と例外は projectId、revision、observationId で指定します。</p>
     <details><summary>プロジェクトIDとリビジョン</summary><ul>{projects.filter(project=>project.source).map(project=><li key={project.id}>{project.name} · {project.id} · r{project.revision}</li>)}</ul></details>

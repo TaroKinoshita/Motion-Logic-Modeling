@@ -60,7 +60,7 @@ function readJson<T>(file: string): T {
   return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
 }
 
-export const DOCUMENT_NAMES = ['observations', 'hypotheses', 'motion_rules', 'simplification', 'adaptation', 'blocks', 'events', 'appearance', 'style_study'] as const;
+export const DOCUMENT_NAMES = ['observations', 'hypotheses', 'motion_rules', 'simplification', 'adaptation', 'blocks', 'events', 'appearance', 'style_study', 'motion_vocabulary'] as const;
 export type ProjectDocuments = Partial<Record<typeof DOCUMENT_NAMES[number], unknown>>;
 type RevisionSnapshot=HistoryEntry & {scene:Scene;documents?:ProjectDocuments;media?:{source?:ProjectMeta['source'];audioAnalysis?:ProjectMeta['audioAnalysis']}};
 const revisionFile=(dir:string,revision:number)=>path.join(dir,'history',`r${String(revision).padStart(6,'0')}.json`);

@@ -12,13 +12,13 @@ const run = promisify(execFile);
 const colors = ['#64c7e7','#ffba6c','#bf9eef','#83dbb3','#e68daf','#e9d874'];
 type Box = [number,number,number,number];
 type Candidate = {text:string;confidence:number|null;inferenceMs:number};
-type Sample = {frame:number;box:Box;paths:number[][];ink:number;ocr?:Candidate};
+type Sample = {frame:number;box:Box;paths:number[][];ink:number;color?:string;ocr?:Candidate};
 type Sequence = {
   fps:number;frames:number;backgrounds:number[];tracks:{id:number;samples:Sample[]}[];
   cameraCandidates:{frame:number;support:number;spread:number;movement:[number,number];medianResidual:number}[];
   runtimeSeconds:number;opencv:string;
 };
-export interface SequenceOptions { from?:number;to?:number;region?:Box;cuts?:number[];ocrFrames?:number[] }
+export interface SequenceOptions { from?:number;to?:number;region?:Box;cuts?:number[];ocrFrames?:number[];profile?:'flat-color'|'framed-type'|'type-only' }
 
 export async function analyzeSequence(project:ProjectMeta, options:SequenceOptions, signal?:AbortSignal, onProgress?:(value:number)=>void):Promise<Sequence> {
   const video=project.source;
@@ -92,7 +92,7 @@ export function sequenceDesign(project:ProjectMeta, base:Scene, measured:Sequenc
     const candidate=samples.filter(sample=>sample.ocr?.text).sort((a,b)=>(b.ocr!.confidence??0)-(a.ocr!.confidence??0))[0]?.ocr;
     const label=candidate&&candidate.confidence!==null&&candidate.confidence>=.9 ? `${candidate.text}（OCR候補）` : `ブロック ${id}`;
     const color=colors[(id-1)%colors.length];
-    const form:Blocking['appearance'][number]={blockId,childIds:[childId],contours:samples.map(sample=>({t:time(sample),luma:sample.ink,paths:sample.paths}))};
+    const form:Blocking['appearance'][number]={blockId,childIds:[childId],contours:samples.map(sample=>({t:time(sample),luma:sample.ink,color:sample.color,paths:sample.paths}))};
     const observationId=`contour:${namespace}:${id}`;
     observations[observationId]={id:observationId,kind:'block-contour',origin:'measured',sourceSha256:source.sha256,sourceRevision:project.revision,
       method:'OpenCV / connected outlines and adjacent-frame assignment',version:measured.opencv,inputs:options,

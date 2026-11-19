@@ -113,7 +113,7 @@ export function editTiming(id: string, input: Exclude<z.infer<typeof TimingReque
   return { ...save(id, input, [...rows,shift], '出来事と音の時差・時刻ずらしを計測'), measurements: rows, shiftControl:shift };
 }
 
-function compareRms(samples:{t:number;speedPxPerS?:number;visibleCount:number}[],fps:number,analysis:unknown,sourceSha256:string) {
+function compareRms(samples:{t:number;speedPxPerS?:number;occupancyChangePerS?:number;visibleCount:number}[],fps:number,analysis:unknown,sourceSha256:string) {
   const decoded=z.object({sourceSha256:z.string(),sourceOffsetSeconds:z.number().optional(),
     energy:z.object({stepSeconds:z.number().positive(),rms:z.array(z.number().nonnegative()).min(1)})}).safeParse(analysis);
   if(!decoded.success||decoded.data.sourceSha256!==sourceSha256) return;
@@ -124,7 +124,7 @@ function compareRms(samples:{t:number;speedPxPerS?:number;visibleCount:number}[]
   const sorted=[...rms].sort((a,b)=>a-b);
   const floor=sorted[Math.floor((sorted.length-1)*.95)]*.05;
   const lagFrames=[-2,-1,0,1,2];
-  const model=(field:'speedPxPerS'|'visibleCount')=>lagFrames.map(frames=>{
+  const model=(field:'speedPxPerS'|'occupancyChangePerS'|'visibleCount')=>lagFrames.map(frames=>{
     const pairs=samples.flatMap(row=>{
       const energy=at(row.t-frames/fps),value=row[field];
       return energy!==undefined&&value!==undefined?[[energy,value]]:[];
@@ -137,7 +137,8 @@ function compareRms(samples:{t:number;speedPxPerS?:number;visibleCount:number}[]
     return {frames,n,pearson:varianceX>1e-12&&varianceY>1e-12?covariance/Math.sqrt(varianceX*varianceY):undefined};
   });
   return {sampleCount,quietThresholdRms:floor,quietFrames:samples.filter(row=>at(row.t)!==undefined&&at(row.t)<=floor).length,
-    speed:model('speedPxPerS'),visibleCount:model('visibleCount'),method:'raw RMS nearest to frame time; positive lag means picture follows audio; quiet uses 5% of source RMS p95'};
+    speed:model('speedPxPerS'),occupancyChange:model('occupancyChangePerS'),visibleCount:model('visibleCount'),
+    method:'raw RMS nearest to frame time; positive lag means picture follows audio; quiet uses 5% of source RMS p95'};
 }
 
 function checkpointBox(scene:Scene,design:Blocking,blockId:string,t:number) {
@@ -257,8 +258,9 @@ function measureMotion(design:NonNullable<ReturnType<typeof getBlocking>['design
     throw new HttpError(422,'工程比較のブロックと、3〜480コマの計測範囲を指定してください');
   }
   const measured=new Map<number,[number,number,number,number]>();
+  const reviewedBox=contourObservation.extend({kind:z.literal('reviewed-text-unit'),boundsSpace:z.literal('source-frame')});
   const evidence=block.observationIds.filter(id=>{
-    const row=contourObservation.safeParse(observations[id]);
+    const row=contourObservation.or(reviewedBox).safeParse(observations[id]);
     if(row.success) for(const sample of row.data.samples) measured.set(sample.frame,sample.box);
     return row.success;
   });
@@ -286,8 +288,10 @@ function measureMotion(design:NonNullable<ReturnType<typeof getBlocking>['design
     const previous=rows[i-1];
     const step=row.cx!==undefined&&row.cy!==undefined&&previous?.cx!==undefined&&previous.cy!==undefined?Math.hypot(row.cx-previous.cx,row.cy-previous.cy):undefined;
     const accelerationPxPerS2=step!==undefined&&previousSpeed!==undefined?(step-previousSpeed)*scene.fps**2:undefined;
+    const occupancyChangePerS=row.occupancyRatio!==undefined&&previous?.occupancyRatio!==undefined?
+      Math.abs(row.occupancyRatio-previous.occupancyRatio)*scene.fps:undefined;
     previousSpeed=step;
-    return {...row,speedPxPerS:step===undefined?undefined:step*scene.fps,accelerationPxPerS2};
+    return {...row,speedPxPerS:step===undefined?undefined:step*scene.fps,accelerationPxPerS2,occupancyChangePerS};
   });
   const stops:{from:number;to:number}[]=[];
   let start:number|undefined;

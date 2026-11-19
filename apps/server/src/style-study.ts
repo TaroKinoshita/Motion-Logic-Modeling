@@ -19,6 +19,8 @@ const motion=z.object({kind:z.literal('block-motion-metrics'),origin:z.string(),
   speedPxPerS:z.number().optional(),accelerationPxPerS2:z.number().optional()})).min(1),stops:z.array(z.object({from:z.number(),to:z.number()}))});
 const glyph=z.object({kind:z.literal('glyph-structure'),relation:z.enum(['combine','ruby']),from:z.number(),to:z.number(),parts:z.array(z.unknown()).optional()});
 const evidenceShape=z.object({kind:z.string().min(1),sourceSha256:z.string(),sourceRevision:revision.optional()});
+const passage=z.object({kind:z.literal('motion-passage-review'),status:z.enum(['confirmed','rejected']),pattern:z.string(),metrics:z.record(z.string(),z.number())});
+const corpusMotion=z.object({kind:z.literal('corpus-motion-measurement'),key:z.string(),values:z.record(z.string(),z.number())});
 
 export function saveStyleStudy(id:string,input:z.infer<typeof StyleStudyRequest>) {
   if(getProject(id).project.revision!==input.baseRevision) throw new HttpError(409,'最新のリビジョンを読み直してください');
@@ -37,6 +39,10 @@ export function saveStyleStudy(id:string,input:z.infer<typeof StyleStudyRequest>
       const observation=evidenceShape.safeParse(raw);
       if(!item||item.revision!==ref.revision||!observation.success||observation.data.sourceSha256!==item.snapshot.sourceSha256) {
         throw new HttpError(422,`作品・リビジョン・元素材に対応する観察がありません: ${ref.projectId} / ${ref.observationId}`);
+      }
+      const reviewed=passage.safeParse(raw);
+      if(reviewed.success&&reviewed.data.status==='rejected'&&entry.evidence.includes(ref)) {
+        throw new HttpError(422,'却下した演出候補は根拠に使えません。例外として記録してください');
       }
       return {...ref,group:item.group,kind:observation.data.kind,values:metrics(entry.axis,raw)};
     });
@@ -64,6 +70,17 @@ export function saveStyleStudy(id:string,input:z.infer<typeof StyleStudyRequest>
 }
 
 function metrics(layer:z.infer<typeof axis>,raw:unknown):{name:string;value:number}[] {
+  const example=corpusMotion.safeParse(raw);
+  if(example.success) {
+    const allowed:Record<z.infer<typeof axis>,string[]>={motion:['arrivalDxPx','settledMaxDxPx','settledSpanSeconds','narrowestWidthRatio'],
+      timing:['entryLagSeconds','secondEntrySeconds'],screen:['leadHeightDrop','heightRatio','secondToCompanionHeightRatio'],meaning:[]};
+    return Object.entries(example.data.values).filter(([name])=>allowed[layer].includes(name))
+      .map(([name,value])=>({name:`${example.data.key}.${name}`,value}));
+  }
+  const reviewed=passage.safeParse(raw);
+  if(reviewed.success&&(layer==='motion'||layer==='timing')) return Object.entries(reviewed.data.metrics)
+    .filter(([name])=>layer==='motion'?['roleCount','displacementRatio'].includes(name):name==='entrySpanSeconds')
+    .map(([name,value])=>({name:`${reviewed.data.pattern}.${name}`,value}));
   const moving=layer==='motion'||layer==='screen'?motion.safeParse(raw):undefined;
   if(moving?.success) {
     const {samples,stops,origin}=moving.data;

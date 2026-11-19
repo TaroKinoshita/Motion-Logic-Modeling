@@ -27,7 +27,8 @@ export const EventsSchema = z.array(z.strictObject({
 }));
 export const AppearanceSchema = z.array(z.strictObject({
   blockId:id,childIds:z.array(id).min(1),
-  contours:z.array(z.strictObject({t:z.number().nonnegative(),luma:z.number().int().min(0).max(255),paths:ElementSchema.shape.outline.unwrap()})).optional(),
+  contours:z.array(z.strictObject({t:z.number().nonnegative(),luma:z.number().int().min(0).max(255),
+    color:z.string().regex(/^#[0-9a-f]{6}$/i).optional(),paths:ElementSchema.shape.outline.unwrap()})).optional(),
 }));
 export const BlockingSchema = z.object({blocks:BlocksSchema,events:EventsSchema,appearance:AppearanceSchema});
 export type Blocking = z.infer<typeof BlockingSchema>;
@@ -45,7 +46,15 @@ export function withBlockingBeatLinks(scene:Scene,design:Blocking) {
     const block=element.parentId??element.id;
     const entry=pins.find(event=>event.outputs.includes(block)&&Math.abs(resolveTime(element.inPoint??-1,tempo)-event.t)<1e-8);
     const exit=pins.find(event=>event.inputs.includes(block)&&Math.abs(resolveTime(element.outPoint??-1,tempo)-event.t)<1e-8);
-    return entry||exit?{...element,inPoint:entry?asBeat(entry.t):element.inPoint,outPoint:exit?asBeat(exit.t):element.outPoint}:element;
+    const times=pins.filter(event=>event.inputs.includes(block)||event.outputs.includes(block)).map(event=>event.t);
+    const transform=element.transform&&times.length?Object.fromEntries(Object.entries(element.transform).map(([property,track])=>{
+      if(typeof track==='number') return [property,track];
+      return [property,{...track,keys:track.keys.map(key=>{
+        const pin=typeof key.t==='number'?times.find(t=>Math.abs(Number(key.t)-t)<1e-8):undefined;
+        return pin===undefined?key:{...key,t:asBeat(pin)};
+      })}];
+    })):element.transform;
+    return entry||exit||transform!==element.transform?{...element,transform,inPoint:entry?asBeat(entry.t):element.inPoint,outPoint:exit?asBeat(exit.t):element.outPoint}:element;
   });
   return {...scene,tempo,elements};
 }
@@ -147,7 +156,7 @@ export function blockingFrame(scene:Scene, design:Blocking, time:number, view:Bl
       const shape=shapes.get(el.id)?.findLast(sample=>sample.t<=time+1e-8);
       if(!shape) return shapes.has(el.id)?[]:[el];
       const extent=extents.get(owner)!;
-      return [{...el,outline:shape.paths,width:Math.max(.01,value(extent.width)-1),height:Math.max(.01,value(extent.height)-1),fill:gray(shape.luma),
+      return [{...el,outline:shape.paths,width:Math.max(.01,value(extent.width)-1),height:Math.max(.01,value(extent.height)-1),fill:shape.color??gray(shape.luma),
         transform:{...el.transform,x:value(extent.cx)-.5+sampleTrack(el.transform?.x,time,0,scene.tempo),
           y:value(extent.cy)-.5+sampleTrack(el.transform?.y,time,0,scene.tempo)}}];
     });

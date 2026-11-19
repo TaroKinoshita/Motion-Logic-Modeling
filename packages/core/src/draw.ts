@@ -42,6 +42,19 @@ export function drawFrame(ctx: CanvasRenderingContext2D, scene: Scene, t: number
         ctx.lineWidth = el.strokeWidth ?? 1;
         ctx.strokeText(el.text ?? '', 0, 0);
       }
+      if(el.ruby&&ev.unitIndex===undefined) {
+        const ink=ctx.measureText(el.text??'');
+        const size=(el.fontSize??48)*.28;
+        ctx.font=fontSpec({...el,fontSize:size});
+        const center=(ink.actualBoundingBoxRight-ink.actualBoundingBoxLeft)/2;
+        if(el.rubyPosition==='right') {
+          const reading=ctx.measureText(el.ruby);
+          ctx.fillText(el.ruby,ink.actualBoundingBoxRight+reading.actualBoundingBoxLeft+size*.45,0);
+        } else {
+          const y=el.rubyPosition==='above'?-ink.actualBoundingBoxAscent-size*.85:ink.actualBoundingBoxDescent+size*.85;
+          ctx.fillText(el.ruby,center,y);
+        }
+      }
     } else {
       ctx.beginPath();
       if(el.vector) {

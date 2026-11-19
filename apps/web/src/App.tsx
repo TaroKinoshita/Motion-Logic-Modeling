@@ -32,6 +32,7 @@ export function App() {
   const [blocking,setBlocking]=useState<{id:string;design:Blocking}|null>(null);
   const [showBlocking,setShowBlocking]=useState(false);
   const [blockJob,setBlockJob]=useState<BlockJob|null>(null);
+  const [analysisProfile,setAnalysisProfile]=useState<'luma'|'flat-color'|'framed-type'|'type-only'>('luma');
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const scene = data?.scene;
@@ -384,13 +385,17 @@ export function App() {
         {id&&revision!==undefined&&activeBlocking?.appearance.some(item=>item.contours?.length)&&<button disabled={!!busyJob(blockJob)} onClick={()=>{
           void api.analyzeBlocking(id,revision,{engine:'sequence-model'}).then(setBlockJob).catch(fail);
         }}>全編を固定形状とキーに変換</button>}
-        {id&&revision&&source&&!design&&<button disabled={!!busyJob(blockJob)} onClick={()=>{
+        {id&&revision&&source&&!design&&<><select aria-label="輪郭の解析方式" value={analysisProfile} onChange={event=>
+          setAnalysisProfile(event.target.value as typeof analysisProfile)}>
+          <option value="luma">明暗</option><option value="flat-color">単色背景と色文字</option>
+          <option value="framed-type">枠と文字</option><option value="type-only">暗地の高コントラスト文字</option>
+        </select><button disabled={!!busyJob(blockJob)} onClick={()=>{
           const cuts=scene?.markers?.filter(marker=>marker.kind==='cut').map(marker=>Math.round(marker.t*scene.fps));
-          const frames=Math.floor(source.duration*source.fps);
+          const frames=source.frameCount??Math.round(source.duration*source.fps);
           const step=Math.max(12,Math.ceil(frames/100));
           const ocrFrames=Array.from({length:Math.floor(frames/step)},(_,index)=>Math.round(step*(index+.5)));
-          void api.analyzeBlocking(id,revision,{cuts,ocrFrames}).then(setBlockJob).catch(fail);
-        }}>輪郭と動きを解析</button>}
+          void api.analyzeBlocking(id,revision,{cuts,ocrFrames,to:frames,profile:analysisProfile==='luma'?undefined:analysisProfile}).then(setBlockJob).catch(fail);
+        }}>輪郭と動きを解析</button></>}
         {id&&blockJob&&<BlockJobStatus job={blockJob}
           onCancel={()=>{void api.cancelBlocking(id,blockJob.id).then(setBlockJob).catch(fail);}}
           onRetry={()=>{void api.retryBlocking(id,blockJob.id).then(setBlockJob).catch(fail);}}/>}

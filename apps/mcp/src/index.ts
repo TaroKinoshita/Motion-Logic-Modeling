@@ -107,8 +107,10 @@ Motion Logic は、参考映像の「動きと演出構成」を単純な図形�
 - music: {baseRevision,path}。ローカルの120秒以内の音声を黒背景の動画として取り込む。既存と同じ再生・書き出し経路を使う。新規プロジェクトで実行後detect_beats、必要なら推定拍を修正する。
 - adapt: {baseRevision,targetProjectId,targetRevision,name,sections:[{sourceFrom,sourceTo,targetFrom,targetTo,elementIds:[ID],reason}]}。全要素の割当を明示。常時表示の背景・親・タイトルは連続する複数区間に同じIDを含める（複製しない）。親子は別区間も可能。秒キーは区間倍率で変換し、拍キーは新曲の拍へ対応、beatとtempoを保持。不等間隔な拍との差はoffsetSecondsに保存。拍情報がない場合に関係を秒へ黙って焼き込むことはしない。区間外の明示した表示範囲も保持。自動の曲構成理解は行わない。
 - adapt-baselines: {baseRevision,targetProjectId,targetRevision,name}。全体速度のみ、最初/最後の拍合わせのみ、固定テンプレートの3版を作る。両シーンに2拍以上必要。拍の局所補正はしない。
-- blocking / blocking/analyze / blocking/edit: 工程比較の取得、輪郭計測ジョブの開始、工程の編集。更新はbaseRevision必須。解析はfrom/toをフレーム番号で指定し、regionは元動画pxの[x,y,w,h]。既存ブロックの再計測はblockIdとregionが必要。
+- blocking / blocking/analyze / blocking/edit: 工程比較の取得、輪郭計測ジョブの開始、工程の編集。更新はbaseRevision必須。解析はfrom/toをフレーム番号で指定し、regionは元動画pxの[x,y,w,h]。profileにflat-color、framed-type、type-onlyを指定可能。既存ブロックの再計測はblockIdとregionが必要。
 - blocking/representative: {baseRevision,label,fragmentIds,from,to,shapeFrame,geometry?}。fromを含みtoの手前までの輪郭断片から、固定の代表形と変形キーを別プロジェクトに保存する。geometry:"affine" でせん断と回転も推定する。
+- blocking/editのkind:"text"はreadingで本文に読みを付ける。reading:nullは削除。readingPositionはbelow（既定）/above/right。rubySourceIdsで旧ルビのブロックを明示し、本文の期間と重なる部分を非表示にできる。
+- blocking/editのkind:"join-tracks"はfirstId/secondIdを時刻順に指定し、確認した隣接軌道を1つにする。固定外観を持つ断片が対象。確定イベント、カット・反転の境界を保護し、元のフレームでの表示を維持する。
 - blocking/analyze: {baseRevision,engine:"sequence-model"} で計測済みの比較範囲を固定形状と変形キーに変換する。完了ジョブのresultProjectIdを開く。入力の観察・出来事・輪郭は元プロジェクトに残る。
 - blocking/timing: operation:"lyric" で {baseRevision,text,reading?,from,to,uncertaintySeconds,replaces?} を秒で保存する。音声を実際に確認した時刻を使う。operation:"measure" は確定した出来事を発音・拍・小節頭・立ち上がりに照合し、符号付きの差を保存する。
 - blocking/timing: operation:"orientation" の {baseRevision,label,from,to,anchors:[[輪郭断片ID,...],[輪郭断片ID,...]]} は2対象を結ぶ線の角度と距離を各コマで計測する。from/toはフレーム単位、toは含まない。
@@ -117,6 +119,10 @@ Motion Logic は、参考映像の「動きと演出構成」を単純な図形�
 - style-study: {baseRevision,works:[{projectId,revision,group,credit,creditBasis}],claims:[{id,axis,label,condition,evidence,exceptions?,generation?}]}。groupはauthor/control、axisはmotion/timing/screen/meaning。根拠と例外は {projectId,revision,observationId}。同じ素材の比較版は別作品として数えない。
 - variant-pair: variantと同じ入力で、規則を1件変えた版と元の設定を共通素材で生成。応答のrevealは評価担当者へ渡す映像に含めない。
 - lyric-study: {baseRevision,targetProjectId,targetRevision,name,lyrics:[{text,from,to,ruby?,parts?,tags?}],effects:[{claimId,kind,tag?,metric?}]}。歌詞は秒単位。効果は entrance/hold/stagger/invert/combine。作品比較で保存した生成範囲を使い、全規則・基準・各規則を外した版を同じ音源で生成。revealは条件の対応表。
+- motion-vocabulary: {baseRevision,clips:[{id,label,blockId,kind,from,to,profile?}]}。kindはslide/squash/rotate/hold/exit/scale-jump。profileはstandard/compact。from/toはフレーム番号でtoを含まない。lyric-studyでcomparison:"motion-layout"、歌詞行のmotion:[{id,duration?,unit?,offset?,strength?,at?}]またはglyphMotion:[{index,motion}]とlayout:{x,y,size,readingRatio?,letterSpacing?}を指定する。exitは表示終端基準、atでstart/endを指定できる。offsetは基準からの秒数。
+- lyric-studyのstaging:[{tag?,target,motion}]でタグに合う行・文字に割り当てる。targetはline/first/last/focus。focusは行のfocus（書記素番号）、なければ最初の漢字か表示文字。明示した動きが優先。glyphMotion.indexとfocusは先頭が0で空白を数える。
+- lyric-studyのcomparison:"composition-compound"は、合字・動き・時刻が共通の4条件を生成する。歌詞行のlayoutとpartLayouts:[{x,y,size}]、compoundShot:{delayFrames?,layout?:{x,y,size}}で、行・部品・切り替え後の構図を指定する。delayFramesは結果が最初に描かれてからのフレーム数（既定1）。反転は切り替えから歌詞行の終わりまで。
+- passages（入力なし）で順次出現・共通移動の候補と保存済み判定を取得。入力を渡す場合は {operation:"review",baseRevision,candidateId,pattern,from,to,blockIds,status,note?}（toは含まない）か {operation:"assemble",baseRevision,reviewId,name,text}。blockIdsの順で文字を割り当てる。候補の根拠は観察IDで確認できる。
 - blocking/analyze に engine:"sprite"、from、to、region を指定すると、Fast Spriteの変形とVTracerの代表形を別プロジェクトへ保存する。toは含まない。結果のプロジェクトIDはジョブのresultProjectId。
 - blocking/export-job: {baseRevision}で4画面のMP4を書き出すジョブを開始。blocking/job / blocking/cancel / blocking/retry: {jobId}で解析・書き出しジョブの状態を読み取り・中断・再試行。
 - documentsでobservations/hypotheses/motion_rules/simplification/adaptationを読む。シーンと同じ履歴に保存しrevertで一緒に戻る。生成結果は通常のget_frames/render_preview/UIで確認できる。
@@ -348,7 +354,7 @@ server.registerTool('detect_beats', {
 
 server.registerTool('model_project', {
   description: '計測・仮説・規則・比較版・別曲への区間対応。詳しい入力はget_guide。更新はbaseRevision必須。',
-  inputSchema: { project_id:z.string(), operation:z.enum(['documents','track-region','measure-events','observe-glyphs','model','style-study','lyric-study','variant','variant-pair','adapt','adapt-baselines','music','blocking','blocking/analyze','blocking/edit','blocking/representative','blocking/timing','blocking/export-job','blocking/job','blocking/cancel','blocking/retry']), input:z.record(z.string(),z.unknown()).optional() },
+  inputSchema: { project_id:z.string(), operation:z.enum(['documents','track-region','measure-events','observe-glyphs','model','style-study','passages','lyric-study','motion-vocabulary','variant','variant-pair','adapt','adapt-baselines','music','blocking','blocking/analyze','blocking/edit','blocking/representative','blocking/timing','blocking/export-job','blocking/job','blocking/cancel','blocking/retry']), input:z.record(z.string(),z.unknown()).optional() },
 }, tool(async (a:{project_id:string;operation:string;input?:Record<string,unknown>}) => {
   const base=`/api/projects/${encodeURIComponent(a.project_id)}`;
   if(['blocking/job','blocking/cancel','blocking/retry'].includes(a.operation)) {
@@ -356,7 +362,7 @@ server.registerTool('model_project', {
     const action=a.operation.split('/')[1];
     return [text(await call(action==='job'?'GET':'POST',`${base}/blocking/jobs/${id}${action==='job'?'':'/'+action}`))];
   }
-  const read=a.operation==='documents'||a.operation==='blocking';
+  const read=a.operation==='documents'||a.operation==='blocking'||(a.operation==='passages'&&!a.input);
   return [text(await call(read?'GET':'POST',`${base}/${a.operation}`,read?undefined:{...a.input,actor:ACTOR}))];
 }));
 

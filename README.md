@@ -143,6 +143,8 @@ UIの「拍を推定」、MCPの`detect_beats`、HTTPの`POST /api/projects/:id/
 
 計測版の工程比較で「全編を固定形状とキーに変換」を実行できる。変換結果は別プロジェクトに保存される。輪郭の特徴が大きく変わる箇所は固定形状を区間ごとに選び、出来事に候補を表示する。輪郭を計測した実素材では `node scripts/verify-lyrics-sequence-model.mjs <元プロジェクトID> <前回の報告JSON> <出力先>` で、Lyricsample1の全編モデルと採点資料を再生成できる。
 
+Lyricsample2〜7の全編比較、文字差し替え、実音源への転用結果は [文書22](docs/22_Corpus_Editable_Review.md)。比較画面の作品一覧から各モデルを開ける。「輪郭と動きを解析」では、素材に合わせて明暗・単色背景と色文字・枠と文字・暗地の高コントラスト文字を選ぶ。
+
 ## M3・M4の初版（API / MCP）
 
 実素材の計測と再現については [Lyricsample1 の再計測](docs/12_Lyricsample1_Followup.md)。`track-region` は明暗のはっきりした字形用の `method:"silhouette"` を選択可能。`observe-glyphs` で合字の部品・ルビを観察として保存できる。既存の日本語フォントと字間の指定、切替の吸着はインスペクターから行える。
@@ -164,5 +166,9 @@ MCPの `model_project(project_id, operation, input)` で次を実行できる。
 同じ画面で発音区間を手で記録し、確定した出来事を発音・拍・小節頭・オンセットと照合できる。2つの輪郭の中心から画面内の角度を計測できる。`style-study` は作品クレジットと観察のリビジョンを保存し、`variant-pair` は共通素材で元の設定と規則を1件変更した比較版を生成する。MCPの入力形式は `get_guide` を参照。
 
 工程比較では代表形のアフィン近似、回転のキー化、停止・速度・占有率の観察、確認コマの別採点を利用できる。`lyric-study` は歌詞区間と作品比較の規則を指定して、基準版・全規則版・規則を1つずつ外した版を同じ音源で生成する。実素材と合成音源での書き出し再現は `node scripts/verify-lyrics-phases.mjs <輪郭プロジェクトID> <出力先>`。 [比較方法と結果](docs/19_Editable_Motion_And_Style_Plan.md)
+
+「観察・仮説・規則」から、ブロックの短い区間を流し・横つぶれ・回転の型として保存できる。`lyric-study` の `comparison: "motion-layout"` は時刻規則を共通にして動きと配置の組み合わせを比較する。行の動きは `motion`、文字別の動きは `glyphMotion`、配置は `layout` で指定する。外観の差し替えでは親文字の読みと表示位置も設定できる。 [設定と実測](docs/20_Motion_Vocabulary_Plan.md)
+
+`comparison: "composition-compound"` は、合字の表示時刻と動きを固定し、文字の大小・配置と、合字に合わせた白黒反転を4条件で比較する。「新しい歌詞から規則比較を生成」の設定例から試せる。 [設定と実測](docs/20_Motion_Vocabulary_Plan.md#合字と構図の比較2026-11-19)
 
 統合検証：`node scripts/verify-modeling.mjs C:/Users/kinos/mlm_samples/kinetic_sample.mp4`。隔離した `data/modeling-validation/` にテスト用プロジェクトとreport.jsonを保存する。[根拠・検証・制限](docs/10_M3_M4_Implementation.md)。

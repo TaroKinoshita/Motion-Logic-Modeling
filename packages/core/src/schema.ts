@@ -69,6 +69,8 @@ export const ElementSchema = z.strictObject({
   stroke: z.string().optional(),
   strokeWidth: z.number().optional(),
   text: z.string().optional(),
+  ruby: z.string().trim().min(1).max(120).optional(),
+  rubyPosition: z.enum(['below','above','right']).optional(),
   anchorX: z.number().optional(),
   anchorY: z.number().optional(),
   fontFamily: z.string().min(1).optional(),

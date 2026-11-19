@@ -10,13 +10,14 @@ import {copyFile} from 'node:fs/promises';
 import {sourcePath} from './media.ts';
 import {spriteModel} from './sprite-model.ts';
 import {createSequenceModel} from './sequence-model.ts';
+import {joinTracks} from './track-join.ts';
 
 const revision=z.number().int().positive();
 const frame=z.number().int().nonnegative();
 const head={baseRevision:revision,actor:z.string().min(1).max(40).default('human')};
 export const SequenceRequest=z.strictObject({...head,from:frame.optional(),to:frame.optional(),
   region:z.tuple([frame,frame,revision,revision]).optional(),cuts:z.array(frame).max(300).optional(),ocrFrames:z.array(frame).max(100).optional(),
-  blockId:z.string().optional(),engine:z.enum(['sprite','sequence-model']).optional(),
+  blockId:z.string().optional(),engine:z.enum(['sprite','sequence-model']).optional(),profile:z.enum(['flat-color','framed-type','type-only']).optional(),
 });
 export const BlockExportRequest=z.strictObject(head);
 export const EditBlockingRequest=z.strictObject({...head,edit:z.discriminatedUnion('kind',[
@@ -26,7 +27,10 @@ export const EditBlockingRequest=z.strictObject({...head,edit:z.discriminatedUni
   z.strictObject({kind:z.literal('box'),blockId:z.string(),frame,cx:z.number(),cy:z.number(),
     width:z.number().positive(),height:z.number().positive(),rotation:z.number().optional()}),
   z.strictObject({kind:z.literal('split'),blockId:z.string(),frame}),
-  z.strictObject({kind:z.literal('text'),blockId:z.string(),text:z.string().trim().min(1).max(120),frame:frame.optional()}),
+  z.strictObject({kind:z.literal('join-tracks'),firstId:z.string().min(1),secondId:z.string().min(1)}),
+  z.strictObject({kind:z.literal('text'),blockId:z.string(),text:z.string().trim().min(1).max(120),frame:frame.optional(),
+    reading:z.string().trim().min(1).max(120).nullable().optional(),readingPosition:z.enum(['below','above','right']).optional(),
+    rubySourceIds:z.array(z.string().min(1)).max(20).optional()}),
   z.strictObject({kind:z.literal('camera'),from:frame,to:frame}),
   z.strictObject({kind:z.literal('group'),blockIds:z.array(z.string()).min(2).max(20),label:z.string().min(1).max(120)}),
   z.strictObject({kind:z.literal('ungroup'),blockId:z.string()}),
@@ -63,7 +67,11 @@ export function editBlocking(id:string,input:z.infer<typeof EditBlockingRequest>
   if(hasFrame&&(t<design.blocks.from||t>=design.blocks.to)) throw new HttpError(422,'比較範囲内のフレームを指定してください');
   const block='blockId' in edit&&edit.blockId?design.blocks.items.find(entry=>entry.id===edit.blockId):undefined;
   if('blockId' in edit&&edit.blockId&&!block) throw new HttpError(404,'ブロックがありません');
-  if(edit.kind==='group') {
+  if(edit.kind==='join-tracks') {
+    const joined=joinTracks(scene,design,edit.firstId,edit.secondId),observationId=`join:${randomUUID()}`;
+    added[observationId]={id:observationId,kind:'track-join',origin:'manual',sourceRevision:project.revision,sourceSha256:project.source?.sha256,...joined};
+    design.blocks.items.find(item=>item.id===joined.survivingId)!.observationIds.push(observationId);
+  } else if(edit.kind==='group') {
     groupBlocks(scene,design,edit.blockIds,edit.label);
   } else if(edit.kind==='camera') {
     const derived=attachCamera(scene,design,getDocuments(id).observations as Record<string,unknown>??{},edit.from,edit.to);
@@ -145,6 +153,19 @@ export function editBlocking(id:string,input:z.infer<typeof EditBlockingRequest>
       const child=shown?.[0];
       if(!appearance||!child) throw new HttpError(422,'外観を割り当てる子要素がありません');
       const start=resolveTime(group.inPoint??0,scene.tempo);
+      const from=Math.max(design.blocks.from,start,resolveTime(child.inPoint??start,scene.tempo));
+      const until=Math.min(design.blocks.to,resolveTime(group.outPoint??scene.duration,scene.tempo),resolveTime(child.outPoint??scene.duration,scene.tempo));
+      const hiddenRuby=[...new Set(edit.rubySourceIds??[])];
+      for(const id of hiddenRuby) {
+        const rubyBlock=design.blocks.items.find(item=>item.id===id);
+        const owner=scene.elements.find(el=>el.id===id);
+        if(id===block.id||!rubyBlock||!owner||rubyBlock.members) throw new HttpError(422,'独立した旧ルビのブロックを指定してください');
+        const lo=Math.max(from,resolveTime(owner.inPoint??0,scene.tempo));
+        const hi=Math.min(until,resolveTime(owner.outPoint??scene.duration,scene.tempo));
+        if(hi<=lo) throw new HttpError(422,'旧ルビの表示期間が本文と重なっていません');
+        rubyBlock.hiddenDuring=[...rubyBlock.hiddenDuring??[],{from:lo,to:hi}];
+      }
+      const previousReading=child.ruby;
       const ink=appearance.contours?.[0]?.luma;
       const fixed=!appearance.contours?.length&&child.width!==undefined&&child.height!==undefined;
       const fill=fixed?child.fill:ink!==undefined&&ink>=128?'#eeeeee':'#242424';
@@ -163,13 +184,16 @@ export function editBlocking(id:string,input:z.infer<typeof EditBlockingRequest>
         child.transform={opacity:child.transform?.opacity,x:x+(left-right)*scaleX/2,y:y+(top-bottom)*scaleY/2,scaleX,scaleY};
       }
       Object.assign(child,{type:'text',text:edit.text,fontFamily:'MLM Yu Gothic',fontWeight:700,fill,
-        fontSize,outline:undefined,vector:undefined});
+        fontSize,outline:undefined,vector:undefined,ruby:edit.reading??undefined,
+        rubyPosition:edit.reading?edit.readingPosition??child.rubyPosition:undefined});
       appearance.contours=undefined;
       if(appearance.childIds.length===1) block.label=edit.text;
       else child.name=edit.text;
       const evidence= `reading:${randomUUID()}`;
       added[evidence]={id:evidence,kind:fixed?'appearance-substitution':'glyph-reading',origin:'manual',blockId:block.id,text:edit.text,sourceSha256:project.source?.sha256,
-        sourceRevision:project.revision,frame:edit.frame,childId:child.id,previousObservations:[...block.observationIds]};
+        sourceRevision:project.revision,frame:edit.frame,childId:child.id,previousObservations:[...block.observationIds],
+        reading:edit.reading,readingPosition:child.rubyPosition,
+        readingStatus:edit.reading===null?'removed':edit.reading?'confirmed':'needs-review',previousReading,hiddenRuby};
       block.observationIds.push(evidence);
     }
   }
