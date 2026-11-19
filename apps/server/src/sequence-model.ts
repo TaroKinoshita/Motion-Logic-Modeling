@@ -13,7 +13,7 @@ import { getDocuments, getProject, HttpError, projectDir, REPO_ROOT } from './st
 const run=promisify(execFile);
 const key=z.object({t:z.number(),value:z.number(),easing:EaseSchema});
 const fitted=z.object({shapeFrame:z.number().int(),geometry:z.enum(['box','affine']),meanShapeIoU:z.number(),minShapeIoU:z.number(),members:z.array(z.string()).min(1),
-  poses:z.array(z.object({shapeFrame:z.number().int(),fromFrame:z.number().int()})).min(1).max(4),
+  poses:z.array(z.object({shapeFrame:z.number().int(),fromFrame:z.number().int()})).min(1),
   tracks:z.object({x:z.array(key).min(1),y:z.array(key).min(1),scaleX:z.array(key).min(1),scaleY:z.array(key).min(1),
     rotation:z.array(key).min(1).optional(),shearX:z.array(key).min(1).optional()})});
 

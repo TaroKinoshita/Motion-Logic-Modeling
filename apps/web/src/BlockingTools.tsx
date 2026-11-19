@@ -256,6 +256,9 @@ export function BlockingTools({design,scene,id,revision,time,job,onJob,onRefresh
       <GlyphEvidenceForm {...{id,revision,time,onRefresh,onError}}/>
       {!!documents?.style_study?.claims.length&&<LyricStudy {...{id,revision,documents,projects,onError}}/>}
       <AdaptOptions id={id} revision={revision} scene={scene} projects={projects} onError={onError}/>
+      {Array.isArray((documents?.adaptation as {companionReview?:unknown}|undefined)?.companionReview)&&
+        (documents?.adaptation as {companionReview:{status:string;kind:string}[]}).companionReview.some(row=>row.status==='needs-review'&&row.kind==='translation')&&
+        <p role="status">差し替えた歌詞の訳は要確認です。元の訳は該当区間で非表示にしています。</p>}
       {documents?.adaptation!=null&&<details><summary>生成条件</summary><pre>{JSON.stringify(documents.adaptation,null,2)}</pre></details>}
     </div>}
   </div>;

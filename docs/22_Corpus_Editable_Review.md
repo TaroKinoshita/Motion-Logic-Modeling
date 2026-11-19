@@ -1,5 +1,7 @@
 # Lyricsample2〜7 全編の編集モデルと実音源比較
 
+文字の取り違え・重複の修正後は [文書23](23_Corpus_Review_Corrections.md) を参照。
+
 2026-11-19。ユーザー提供の6抜粋を、同じ映像担当と申告された素材として全編解析した。提出物は [比較ファイル一覧](../data/Lyricsample_Corpus_Editable/INDEX.md) と [計測・出典・アプリのリビジョン](../data/Lyricsample_Corpus_Editable/report.json)。素材ごとに元映像、中間①の動き、中間②の出来事、最終調整の4画面を置き、文字差し替え版も別プロジェクトに保存した。
 
 | 素材 | 比較コマ数 | 置換したテキスト要素数 | 前景IoU | 2コマ以下のブロック / 全数 |

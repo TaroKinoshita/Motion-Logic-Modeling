@@ -136,8 +136,14 @@ def shape_spans(samples):
     return spans
 
 
-def model(samples):
-    spans = shape_spans(samples)
+def model(samples, cuts=()):
+    # A cut is evidence about identity. A representative can only describe
+    # the observations between two such boundaries, even on a continuous track.
+    starts = [0] + [i for i in range(1, len(samples))
+                    if any(samples[i - 1]['frame'] < cut <= samples[i]['frame'] for cut in cuts)] + [len(samples)]
+    spans = [(left + start, right + start)
+             for start, end in zip(starts, starts[1:])
+             for left, right in shape_spans(samples[start:end])]
     poses = [(fit_pose(samples[start:end]), start, end) for start, end in spans]
     if len(poses) == 1:
         return dict(poses[0][0], poses=[dict(shapeFrame=poses[0][0]['shapeFrame'], fromFrame=samples[0]['frame'])])
@@ -167,7 +173,7 @@ def main():
         inputs = json.load(source)
     models = {}
     for members, samples in stitch(inputs['tracks'], inputs['cuts']):
-        models[members[0]] = dict(model(samples), members=members)
+        models[members[0]] = dict(model(samples, inputs['cuts']), members=members)
     with open(sys.argv[2], 'w', encoding='utf-8') as output:
         json.dump(models, output, allow_nan=False)
 

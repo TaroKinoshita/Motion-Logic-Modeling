@@ -19,6 +19,22 @@ const context=createCanvas(1,1).getContext('2d');
 const python=process.env.MLM_TRACK_PYTHON??path.join(REPO_ROOT,'workers','track','.venv',process.platform==='win32'?'Scripts/python.exe':'bin/python');
 const fitter=path.join(REPO_ROOT,'workers','track','track','motion_vocabulary_fit.py');
 const read=async file=>JSON.parse(await fs.readFile(file,'utf8'));
+const correctedOutput=path.join(dir,'Corrections');
+const reviewedShots={
+  2:[{id:'tokui',label:'得意げに',boundaries:[30,32,41,47],region:[.18,.35,.82,.58],polarity:'cream',checks:[30,42]}],
+  3:[
+    {id:'mu-te',label:'む手と枠',boundaries:[12,14,17,19],region:[.26,.18,.77,.76],polarity:'frame',checks:[15,18]},
+    {id:'katsu',label:'勝と回転する右字',boundaries:[71,72,73,75],region:[.26,.22,.79,.77],polarity:'frame',checks:[72,75]},
+  ],
+  4:[{id:'arrow',label:'矢印と字の色を分離',boundaries:[149,154,169,173,176,192],region:[.10,.08,.77,.96],polarity:'dark-blue',checks:[151,179]}],
+  5:[
+    {id:'nomi',label:'飲・だ',boundaries:[35,36,41],region:[0,0,1,.91],polarity:'dark',checks:[37,39]},
+    {id:'ne',label:'ねと三角枠',boundaries:[77,79],region:[0,0,1,.93],polarity:'dark',checks:[78,82]},
+    {id:'kara',label:'カラカラの変形',boundaries:[273,274,276,277],region:[.05,.08,.95,.88],polarity:'bright',checks:[273,275,276]},
+  ],
+  6:[{id:'dou',label:'傾いた動と周辺の小字',boundaries:[188,190,191,192],region:[.19,.01,.91,.93],polarity:'dark',checks:[190,191]}],
+  7:[{id:'mae',label:'前とルビ',boundaries:[92,94,96,100],region:[.47,.10,.91,.84],polarity:'bright',checks:[93,95,98]}],
+};
 
 // Source coordinates and IDs were checked against the displayed source frames.
 const captionCases={
@@ -132,7 +148,6 @@ function keepSceneVisibility(scene,design) {
       {keys:[...keys].sort((a,b)=>a[0]-b[0]).map(([t,v])=>({t,v,ease:'hold'}))};
     for(const id of binding.childIds) {
       const child=byId.get(id);
-      assert.equal(child.transform?.opacity,undefined);
       child.transform={...child.transform,opacity};
     }
   }
@@ -166,7 +181,8 @@ function palette(project) {
 
 async function applyReview(sample,analysis,model) {
   const {project,scene,design}=model;
-  const {fps}=scene,originals=[...design.blocks.items],docs=getDocuments(project.id),marked={},substitutions=[];
+  const {fps}=scene,originals=[...design.blocks.items],docs=getDocuments(project.id),marked={},substitutions=[],shotAudit=[],companionReview=[];
+  let clauseBounds=[];
   const head={sourceSha256:analysis.sourceSha256,sourceRevision:analysis.sourceRevision,sourceProjectId:analysis.sourceProjectId};
   if(sample===7) scene.background='#101010';
   else scene.elements.push(...palette(project));
@@ -253,8 +269,15 @@ async function applyReview(sample,analysis,model) {
       {encoding:'utf8',windowsHide:true}));
     const hide=(track,from,to)=>hideExisting(scene,design,item=>item.observationIds.includes(`contour:corpus4:${track}`),from/fps,to/fps,originals);
     const originalColor='#fae6ce';
+    clauseBounds=rows['right-clause'];
     hide(1,1,33);
     hide(42,33,55);
+    hide(114,149,192);
+    hide(115,149,192);
+    for(const [frame,name] of [[1,'title'],[33,'elapsed']]) companionReview.push({
+      status:'needs-review',kind:'translation',from:frame,to:name==='title'?33:55,
+      action:'hide-original-until-reviewed',
+    });
     for(const [i,role,text,alternate,span] of [
       [0,'title','行き詰まって','目を閉じて',[1,19]],
       [1,'title','行き詰まって 時が','目を閉じて 風が',[19,33]],
@@ -285,6 +308,39 @@ async function applyReview(sample,analysis,model) {
       newBinding(group,child,width,height,evidence);
       marked[evidence]={...head,id:evidence,kind:'reviewed-graphic-unit',origin:'manual',sourceColor:fill,samples,
         method:'color mask and independent transform fit; simple geometry approximation'};
+    }
+  }
+  const cases=reviewedShots[sample]??[];
+  if(cases.length) {
+    await fs.mkdir(correctedOutput,{recursive:true});
+    const target=path.join(correctedOutput,`Lyricsample${sample}-shot-fits.json`);
+    execFileSync(python,[path.join(REPO_ROOT,'scripts','measure-reviewed-shots.py'),sourcePath(project),JSON.stringify(cases),target],
+      {windowsHide:true,timeout:120000});
+    const repaired=await read(target);
+    for(const [index,item] of cases.entries()) {
+      const [from,to]=[item.boundaries[0],item.boundaries.at(-1)];
+      const [left,top,right,bottom]=item.region;
+      const suppress=block=>item.id==='arrow'?block.observationIds.includes('contour:corpus4:111'):
+        block.observationIds.flatMap(id=>docs.observations[id]?.samples??[]).some(({frame,box:[x,y,w,h]})=>
+        frame>=from&&frame<to&&(x+w/2)/scene.width>=left&&(x+w/2)/scene.width<=right&&
+        (y+h/2)/scene.height>=top&&(y+h/2)/scene.height<=bottom);
+      hideExisting(scene,design,suppress,from/fps,to/fps,originals);
+      const spans=[];
+      for(const fitted of repaired[index]) {
+        const {reference,frames,tracks,shapeIoU}=fitted,[,,w,h]=reference.box;
+        const first=frames[0],end=frames.at(-1)+1,id=`review-shot:${item.id}:${first}`;
+        const evidence=id+':observation',inPoint=first/fps,outPoint=end/fps;
+        const transform=Object.fromEntries(Object.entries(tracks).map(([name,keys])=>[name,keys.every(k=>k.value===keys[0].value)?keys[0].value:
+          {keys:keys.map(({t,value,easing})=>({t,v:value,ease:easing}))}]));
+        const hidden=frames.slice(1).flatMap((frame,i)=>frame>frames[i]+1?[{from:(frames[i]+1)/fps,to:frame/fps}]:[]);
+        newBinding({id,type:'group',name:item.label,inPoint,outPoint,transform},
+          {id:id+':outline',parentId:id,type:'rect',fill:reference.fill,outline:reference.paths,width:w-1,height:h-1,inPoint,outPoint},w-1,h-1,evidence,hidden);
+        marked[evidence]={...head,id:evidence,kind:'visually-reviewed-shot',origin:'manual',frameRange:[first,end],referenceFrame:reference.frame,
+          boundaryReason:'appearance and composition inspected in source video',shapeIoU};
+        spans.push({id,from:first,to:end,referenceFrame:reference.frame,shapeIoU,transformChannels:Object.keys(transform)});
+      }
+      for(const frame of item.checks) assert.equal(spans.filter(s=>s.from<=frame&&frame<s.to).length,Number(from<=frame&&frame<to),`${sample}:${frame}`);
+      shotAudit.push({...item,spans});
     }
   }
   if(sample===3) {
@@ -341,15 +397,15 @@ async function applyReview(sample,analysis,model) {
   }
   keepSceneVisibility(scene,design);
   validateBlocking(scene,design);
-  return {substitutions,documents:{...docs,...design,observations:{...docs.observations,...marked}}};
+  return {substitutions,shotAudit,companionReview,clauseBounds,documents:{...docs,...design,observations:{...docs.observations,...marked}}};
 }
 
 async function publish(sample) {
   const analysis=await read(path.join(dir,`sample-${sample}-analysis.json`));
   const model=getBlocking(analysis.model.projectId),raw=getBlocking(analysis.rawProjectId);
-  const files=path.join(dir,`Lyricsample${sample}`);
+  const files=path.join(correctedOutput,`Lyricsample${sample}`);
   await fs.mkdir(files,{recursive:true});
-  const {substitutions,documents}=await applyReview(sample,analysis,model);
+  const {substitutions,shotAudit,companionReview,clauseBounds,documents}=await applyReview(sample,analysis,model);
   const {scene,design}=model;
   const measure=canvasMeasurer(context);
   const visible=(scene,t)=>evaluateScene(scene,t,measure).filter(row=>row.opacity>0).map(row=>row.element.id);
@@ -364,6 +420,34 @@ async function publish(sample) {
     timing={revision:measured.project.revision,events:measured.measurements,shiftControl:measured.shiftControl};
   }
   const alternate=structuredClone(scene);
+  const variantDesign=structuredClone(design);
+  const replacementClauses=[];
+  if(sample===4) {
+    const originalBlocks=variantDesign.blocks.items.filter(b=>b.id.startsWith('track:'));
+    const observations=documents.observations;
+    for(const review of companionReview) hideExisting(alternate,variantDesign,block=>{
+      return block.observationIds.flatMap(id=>observations[id]?.samples??[]).some(({frame,box:[x,y,w,h]})=>
+        review.from<=frame&&frame<review.to&&y/scene.height>.59&&y/scene.height<.71&&h/scene.height<.035&&x/scene.width<.67&&w/scene.width<.35);
+    },review.from/scene.fps,review.to/scene.fps,originalBlocks);
+    const {fps,width,height}=scene;
+    hideExisting(alternate,variantDesign,block=>block.id.startsWith('track:')&&block.observationIds.flatMap(id=>observations[id]?.samples??[])
+      .some(({frame,box:[x,y,w,h]})=>104<=frame&&frame<139&&x+w/2>width*.49&&y+h/2>height*.28&&y+h/2<height*.72),
+    104/fps,139/fps,variantDesign.blocks.items);
+    for(const [from,to,text] of [[107,113,'わ'],[113,124,'わらない'],[124,139,'わらないけれど']]) {
+      const rows=clauseBounds.filter(row=>from<=row.frame&&row.frame<to);
+      assert.ok(rows.length);
+      const [,,w,h]=rows.at(-1).box,id=`review-clause:${from}`;
+      const {tracks}=fitBoxes(rows,fps,[],[w,h]);
+      const life={inPoint:from/fps,outPoint:to/fps};
+      alternate.elements.push({id,type:'group',name:text,transform:tracks,...life},
+        {...textLayer(text,w,h,'#fae6ce','contain',400,14),id:id+':text',parentId:id,...life});
+      variantDesign.blocks.items.push({id,label:text,color:'#67c8de',extent:{cx:0,cy:0,width:w,height:h},observationIds:[]});
+      variantDesign.appearance.push({blockId:id,childIds:[id+':text']});
+      replacementClauses.push({from,to,text:'伝'+text});
+    }
+    keepSceneVisibility(alternate,variantDesign);
+    validateBlocking(alternate,variantDesign);
+  }
   for(const item of substitutions) {
     const {id,parentId,text,width,height,fill,weight,spacing}=item;
     const index=alternate.elements.findIndex(el=>el.id===id);
@@ -371,20 +455,20 @@ async function publish(sample) {
     alternate.elements[index]={...original,...replacement,transform:{...replacement.transform,opacity:original.transform?.opacity}};
     for(const frame of item.frames) assert.deepEqual(worldMatrixOf(alternate,parentId,frame/scene.fps),worldMatrixOf(scene,parentId,frame/scene.fps));
   }
-  const variant=saveGeneratedProject(`Lyricsample${sample} · 文字差し替え試験`,alternate,original.project.id,actor,
-    {...documents,adaptation:{kind:'reviewed-text-replacements',sourceProjectId:original.project.id,
-      sourceRevision:timing?.revision??original.project.revision,substitutions}});
+  const variant=saveGeneratedProject(`Lyricsample${sample} · 文字差し替え試験（レビュー修正）`,alternate,original.project.id,actor,
+    {...documents,...variantDesign,adaptation:{kind:'reviewed-text-replacements',sourceProjectId:original.project.id,
+      sourceRevision:timing?.revision??original.project.revision,substitutions,companionReview,replacementClauses}});
   const focus=await exportBlocking(original.project.id,640);
   await fs.copyFile(focus.path,path.join(files,'01-comparison.mp4'));
-  const exportWork=async(project,stage,file,view)=>{
+  const exportWork=async(project,stage,file,view,viewDesign=design)=>{
     const output=await exportVideo(project,stage,{from:design.blocks.from,to:design.blocks.to,width:640,
-      layout:'render',withAudio:view==='final',outputTag:file,sceneAt:t=>blockingFrame(stage,design,t,view)});
+      layout:'render',withAudio:view==='final',outputTag:file,sceneAt:t=>blockingFrame(stage,viewDesign,t,view)});
     await fs.copyFile(output.path,path.join(files,`${file}.mp4`));
   };
   await exportWork(original.project,scene,'02-motion','motion');
   await exportWork(original.project,scene,'03-events','events');
   await exportWork(original.project,scene,'04-editable','final');
-  await exportWork(variant.project,alternate,'05-replacement','final');
+  await exportWork(variant.project,alternate,'05-replacement','final',variantDesign);
   const names=['01-comparison','02-motion','03-events','04-editable','05-replacement'];
   for(const name of names) {
     const streams=probe(path.join(files,`${name}.mp4`));
@@ -398,7 +482,7 @@ async function publish(sample) {
     blockCount:design.blocks.items.length,shortBlocks:design.blocks.items.filter(block=>{
       const el=scene.elements.find(item=>item.id===block.id);
       return (resolveTime(el.outPoint??scene.duration,scene.tempo)-resolveTime(el.inPoint??0,scene.tempo))*scene.fps<=2.000001;
-    }).length,substitutions,timing,estimatedBeatCount:model.project.audioAnalysis?.beats?.length??0};
+    }).length,substitutions,shotAudit,companionReview,replacementClauses,timing,estimatedBeatCount:model.project.audioAnalysis?.beats?.length??0};
   await fs.writeFile(path.join(files,'report.json'),JSON.stringify(report,null,2));
   console.log(sample,report.projectId,variant.project.id,report.frames,report.substitutions.length);
 }

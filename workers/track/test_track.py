@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +12,21 @@ from track.easing import fit_eased_track
 
 
 class TrackingTests(unittest.TestCase):
+    def test_representatives_do_not_cross_declared_cuts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'observed.json'
+            target = Path(directory) / 'model.json'
+            frames = range(12)
+            cuts = [2, 4, 6, 8, 10]
+            shape = [0, 0, 4096, 0, 4096, 4096, 0, 4096]
+            samples = [dict(frame=f, t=f / 30, box=[0, 0, 11, 11], paths=[shape]) for f in frames]
+            source.write_text(json.dumps(dict(cuts=cuts, tracks=[dict(id='A', protected=False, samples=samples)])), encoding='utf-8')
+            worker = Path(__file__).parent / 'track' / 'sequence_representative.py'
+            subprocess.run([sys.executable, str(worker), str(source), str(target)], check=True)
+            poses = json.loads(target.read_text(encoding='utf-8'))['A']['poses']
+            self.assertEqual([item['fromFrame'] for item in poses], [0, *cuts])
+            self.assertTrue(all(item['fromFrame'] <= item['shapeFrame'] < item['fromFrame'] + 2 for item in poses))
+
     def make_clip(self, directory, blank_after=None):
         file = Path(directory) / 'motion.avi'
         writer = cv2.VideoWriter(str(file), cv2.VideoWriter_fourcc(*'MJPG'), 30, (320, 240))

@@ -46,6 +46,8 @@ def measure(video):
                 record('dark-circle', dark, .10, 0., .73, .87, largest=True)
             if 149 <= frame < 192:
                 record('night', cream, .12, .23, .57 if frame >= 173 else .67, .84)
+            if 104 <= frame < 139:
+                record('right-clause', cream, .65, .32, 1., .68)
     finally:
         capture.release()
     return rows
