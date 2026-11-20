@@ -11,6 +11,7 @@ import { canvasMeasurer, emptyScene, evaluateScene, fontSpec, type Scene, type S
 import { getProject, HttpError } from './store.ts';
 import { PASSAGES, type PassageSpec } from './passage-library.ts';
 import { partsOf } from './kanji-parts.ts';
+import { designLockup, type LockupItem } from './lockup.ts';
 import type { AppearanceBinding } from './lyric-planner.ts';
 import './fonts.ts';
 
@@ -18,7 +19,9 @@ export interface StageToken { text: string; at: number; emphasis: boolean; compo
 export interface StageLine { from: number; to: number; tokens: StageToken[] }
 export interface StageOptions { width: number; height: number; fps: number; duration: number; variation?: number;
   /** Loudness rank per line, 0 (quiet) .. 1 (loud). Missing: all lines are treated as middle. */
-  intensity?: number[]; rng?: () => number }
+  intensity?: number[]; rng?: () => number;
+  /** composed: lockup + camera + added entrances (docs/48). faithful (default): reference scenes as they are (docs/49). */
+  mode?: 'faithful' | 'composed' }
 type Options = StageOptions;
 type Key = { t: number; v: number; ease?: Ease };
 type Ease = NonNullable<Exclude<Track, number>['keys'][number]['ease']>;
@@ -137,7 +140,12 @@ function fitWord(slot: LoadedSlot, text: string) {
   const squash = Math.min(1.1, Math.max(.9, slot.aspect)) / slot.aspect;
   const base = inkOf(text, 100);
   const heightFit = slot.localH / Math.max(1, base.h);
-  const widthFit = slot.localW * 1.25 / Math.max(1, base.w * squash);
+  // Phrase slots keep the source's character size and may grow sideways up to 90% of the frame width;
+  // glyph slots stay within 1.25x their width so neighbouring glyphs do not collide.
+  const phrase = slot.localW / Math.max(1, slot.localH) >= 1.6;
+  const frameW = slot.medianH > 0 ? .9 * (16 / 9) * slot.localH / slot.medianH : slot.localW * 1.25;
+  const allowW = phrase ? Math.max(slot.localW * 1.25, frameW) : slot.localW * 1.25;
+  const widthFit = allowW / Math.max(1, base.w * squash);
   const floor = slot.medianH > 0 ? READABLE / slot.medianH * heightFit : 0;
   const scale = Math.min(heightFit * 1.3, Math.max(Math.min(heightFit, widthFit), Math.min(floor, heightFit * 1.3)));
   const shown = slot.medianH * scale / heightFit;
@@ -147,12 +155,13 @@ function fitWord(slot: LoadedSlot, text: string) {
 const SHOW_TAGS = new Set(['big', 'big-result', 'invert', 'merge', 'collective-shrink', 'small-then-big', 'tilt']);
 const BRIDGE_TAGS = new Set(['phrase', 'bar', 'arrow', 'spread', 'row', 'frame', 'append']);
 
-export interface ChunkPlan { passage: string; work: string; tokens: string[]; start: number; end: number;
+export interface ChunkPlan { passage: string; work: string; tokens: string[]; units?: StageToken[]; start: number; end: number;
   stretch: number; score: number; reasons: string[]; alternatives: { passage: string; score: number }[] }
 
-function scoreChunk(p: LoadedPassage, tokens: StageToken[], start: number, end: number, intensity: number) {
+function scoreChunk(p: LoadedPassage, tokens: StageToken[], start: number, end: number, intensity: number, faithful = false) {
   const m = p.textSlots.length, k = tokens.length, reasons: string[] = [];
-  let score = m === k ? 2 : m < k ? -1.5 * (k - m) : -1 * (m - k);
+  // Glyph scenes must not cram several characters into one glyph slot; phrase slots can take joined words.
+  let score = m === k ? 2 : m < k ? (faithful && !glyphScene(p) ? -.5 : -1.5) * (k - m) : -1 * (m - k);
   const stretch = (end - start) / (p.toSec - p.fromSec);
   score -= 1.5 * Math.abs(Math.log(stretch));
   const emphasized = tokens.findIndex(token => token.emphasis);
@@ -163,6 +172,10 @@ function scoreChunk(p: LoadedPassage, tokens: StageToken[], start: number, end: 
     const fit = fitWord(slot, text);
     if (fit.ratio > 1.25) score -= (m > 1 ? 1.2 : .6) * Math.log(fit.ratio / 1.25);
     if (fit.shown < .07) score -= 1.5;
+    // A phrase slot should not carry far more characters than the source phrase had.
+    const sourceChars = Math.max(1, Math.round(slot.localW / Math.max(1, slot.localH)));
+    const newChars = Array.from(text).length;
+    if (slot.localW / Math.max(1, slot.localH) >= 1.6 && newChars > 1.6 * sourceChars) score -= .8 * (newChars / sourceChars - 1.6);
     if (fit.shown < .04) score -= 2;
   }
   // Part-merge: a compound triple (part, part, kanji) belongs in a merge passage, whole.
@@ -177,14 +190,27 @@ function scoreChunk(p: LoadedPassage, tokens: StageToken[], start: number, end: 
   return { score, stretch, reasons };
 }
 
+/** Scenes built from single-glyph slots (each slot roughly square) take characters, not words. */
+const glyphScene = (p: LoadedPassage) => p.textSlots.every(slot => slot.localW / Math.max(1, slot.localH) < 1.6);
+/** Spread a word's characters over its time span (the reference scenes animate glyph by glyph). */
+function explodeChars(tokens: StageToken[], end: number, fps: number): StageToken[] {
+  return tokens.flatMap((token, k) => {
+    const chars = Array.from(token.text);
+    if (chars.length <= 1 || token.compound !== undefined) return [token];
+    const next = k + 1 < tokens.length ? tokens[k + 1].at : end;
+    const step = (next - token.at) / chars.length;
+    return chars.map((c, j) => ({ text: c, at: Math.round((token.at + step * j) * fps) / fps, emphasis: token.emphasis }));
+  }).filter((t, i, all) => i === 0 || t.at > all[i - 1].at || (t.at = all[i - 1].at, true));
+}
+
 /** Choose passages for one line: split its tokens into consecutive chunks (DP over chunk sizes). */
 function planLine(line: StageLine, passages: LoadedPassage[], previous: string | undefined, usage: Map<string, number>,
-  intensity: number, rng: () => number) {
+  intensity: number, rng: () => number, faithful = false, fps = 30) {
   const n = line.tokens.length;
   type State = { score: number; chunks: ChunkPlan[] };
   const best: (State | undefined)[] = [{ score: 0, chunks: [] }];
   for (let i = 1; i <= n; i++) {
-    for (let k = 1; k <= Math.min(4, i); k++) {
+    for (let k = 1; k <= Math.min(faithful ? 8 : 4, i); k++) {
       const before = best[i - k];
       if (!before) continue;
       const tokens = line.tokens.slice(i - k, i);
@@ -196,10 +222,14 @@ function planLine(line: StageLine, passages: LoadedPassage[], previous: string |
       const end = i === n ? line.to : line.tokens[i].at;
       const last = before.chunks.at(-1)?.passage ?? previous;
       const scored = passages.map(p => {
-        const s = scoreChunk(p, tokens, start, end, intensity);
+        // Faithful: glyph scenes receive characters, phrase scenes receive words.
+        const units = faithful && glyphScene(p) ? explodeChars(tokens, end, fps) : tokens;
+        const s = scoreChunk(p, units, start, end, intensity, faithful);
         const used = (usage.get(p.spec.id) ?? 0) + before.chunks.filter(c => c.passage === p.spec.id).length;
         const repeat = (p.spec.id === last ? 3 : 0) + 2.2 * used;
-        return { p, score: s.score - repeat, stretch: s.stretch, reasons: s.reasons };
+        // Faithful: one reference scene should carry as much of the line as possible (fewer seams).
+        const span = faithful ? 1.6 * (tokens.length - 1) : 0;
+        return { p, units, score: s.score - repeat + span, stretch: s.stretch, reasons: s.reasons };
       }).sort((a, b) => b.score - a.score);
       // Variety: pick at random among candidates within 0.8 of the best score.
       const near = scored.filter(c => c.score >= scored[0].score - .8);
@@ -207,7 +237,7 @@ function planLine(line: StageLine, passages: LoadedPassage[], previous: string |
       const total = before.score + pick.score;
       if (!best[i] || total > best[i]!.score) {
         best[i] = { score: total, chunks: [...before.chunks, { passage: pick.p.spec.id, work: pick.p.spec.work,
-          tokens: tokens.map(t => t.text), start, end, stretch: pick.stretch, score: pick.score, reasons: pick.reasons,
+          tokens: tokens.map(t => t.text), units: pick.units, start, end, stretch: pick.stretch, score: pick.score, reasons: pick.reasons,
           alternatives: scored.filter(a => a !== pick).slice(0, 3).map(a => ({ passage: a.p.spec.id, score: a.score })) }] };
       }
     }
@@ -229,6 +259,27 @@ function valueAt(track: Track | undefined, t: number, fallback: number) {
     }
   }
   return keys.at(-1)!.v;
+}
+
+const offsetTrack = (track: Track | undefined, add: number, fallback: number): Track =>
+  track === undefined ? fallback + add : typeof track === 'number' ? track + add : { ...track, keys: track.keys.map(k => ({ ...k, v: k.v + add })) };
+const scaleTrack = (track: Track | undefined, mul: number): Track =>
+  track === undefined ? mul : typeof track === 'number' ? track * mul : { ...track, keys: track.keys.map(k => ({ ...k, v: k.v * mul })) };
+/** Cut a track at ts and hold its value there until end. */
+function settleTrack(track: Track, ts: number, end: number, value: number): Track {
+  const keys = typeof track === 'number' ? [] : (track.keys.filter(k => typeof k.t === 'number' && (k.t as number) < ts - 1e-9) as Key[]);
+  return { keys: [...keys, { t: ts, v: value, ease: 'hold' }, ...(end > ts ? [{ t: end, v: value }] : [])] };
+}
+
+/** Which text each text slot shows for the given tokens (same rule as retarget). Compound parts are marked. */
+export function slotTexts(p: LoadedPassage, tokens: StageToken[]) {
+  const used = Math.min(tokens.length, p.textSlots.length);
+  return p.textSlots.slice(0, used).map((slot, i) => {
+    const covered = i === used - 1 ? tokens.slice(i) : [tokens[i]];
+    const text = covered.map(t => t.text).join('');
+    const part = covered.every(t => t.compound !== undefined && !t.emphasis);
+    return { slotIndex: slot.index, text, emphasis: covered.some(t => t.emphasis), part };
+  });
 }
 
 /** Text groups must not stay squashed or shrunk (feedback: a word must not leave incomplete). A squash
@@ -294,7 +345,8 @@ function characterEntrance(text: string, font: number, inPoint: number, outPoint
 }
 
 /** Retarget one passage into [start, end] with the given tokens. Returns block elements and appearance bindings. */
-export function retarget(p: LoadedPassage, tokens: StageToken[], start: number, end: number, prefix: string, o: Options) {
+export interface SettleOptions { targets: Map<number, LockupItem>; lineEnd: number; fill: string }
+export function retarget(p: LoadedPassage, tokens: StageToken[], start: number, end: number, prefix: string, o: Options, settle?: SettleOptions) {
   const snap = snapper(o.fps);
   const rng = o.rng ?? seeded(1);
   const used = Math.min(tokens.length, p.textSlots.length);
@@ -327,7 +379,7 @@ export function retarget(p: LoadedPassage, tokens: StageToken[], start: number, 
     // Sparse linear segments (gaps over 2 frames) get a strong ease; dense measured keys stay as they are.
     for (let i = 0; i < keys.length - 1; i++) {
       const e = keys[i].ease;
-      if ((e === undefined || e === 'linear') && keys[i + 1].t - keys[i].t > 2.5 / o.fps) keys[i].ease = EXPO_IN_OUT;
+      if (o.mode === 'composed' && (e === undefined || e === 'linear') && keys[i + 1].t - keys[i].t > 2.5 / o.fps) keys[i].ease = EXPO_IN_OUT;
     }
     return keys.length ? { keys } : undefined;
   };
@@ -346,11 +398,40 @@ export function retarget(p: LoadedPassage, tokens: StageToken[], start: number, 
     const outPoint = snap(Math.min(end, g(sec(g0.outPoint, p.toSec))));
     if (slot.role === 'text') inPoint = Math.max(inPoint, snap(anchorAt.get(slot.index)!));
     if (outPoint <= inPoint) continue;
-    const fill = dark((sec(g0.inPoint, p.fromSec) + sec(g0.outPoint, p.toSec)) / 2) ? PAPER : INK;
+    const fill = settle ? settle.fill : dark((sec(g0.inPoint, p.fromSec) + sec(g0.outPoint, p.toSec)) / 2) ? PAPER : INK;
     const groupId = `${prefix}:${slot.index}`;
     const transform = transformOf(g0.transform, true);
-    if (slot.role === 'text') recoverScale(transform, inPoint, outPoint, o.fps);
-    elements.push({ id: groupId, name: text ?? g0.name, type: 'group', inPoint, outPoint, transform });
+    // Faithful mode keeps the reference's own shrink and squash; the recovery rule is for composed mode.
+    if (slot.role === 'text' && o.mode === 'composed') recoverScale(transform, inPoint, outPoint, o.fps);
+    const target = slot.role === 'text' ? settle?.targets.get(slot.index) : undefined;
+    let life = outPoint;
+    if (target && settle) {
+      // Back-solve: keep the passage motion's shape but make it end exactly on the designed lockup pose,
+      // then hold that pose until the line ends (docs/48).
+      const inkH = inkOf(text!, fitWord(slot, text!).font).h;
+      const ts = Math.min(settle.lineEnd, Math.max(outPoint, snap(inPoint + 6 / o.fps)));
+      const sxP = valueAt(transform.scaleX, ts, 1), syP = valueAt(transform.scaleY, ts, 1);
+      const rotP = valueAt(transform.rotation, ts, 0), shearP = valueAt(transform.shearX, ts, 0);
+      const st = target.h / Math.max(1, inkH), th = target.rotation * Math.PI / 180;
+      transform.scaleX = scaleTrack(transform.scaleX, st / (Math.abs(sxP) > 1e-6 ? sxP : 1));
+      transform.scaleY = scaleTrack(transform.scaleY, st / (Math.abs(syP) > 1e-6 ? syP : 1));
+      transform.rotation = offsetTrack(transform.rotation, target.rotation - rotP, 0);
+      transform.shearX = offsetTrack(transform.shearX, -shearP, 0);
+      const gx = target.x - st * (Math.cos(th) * slot.localX - Math.sin(th) * slot.localY);
+      const gy = target.y - st * (Math.sin(th) * slot.localX + Math.cos(th) * slot.localY);
+      // Scaling the whole track to the rest size can blow up the entrance; cap it so the word stays near the frame.
+      const capScale = Math.max(st, o.width * 1.05 / Math.max(1, inkOf(text!, fitWord(slot, text!).font).w));
+      for (const name of ['scaleX', 'scaleY'] as const) {
+        const track = transform[name];
+        if (track && typeof track !== 'number') transform[name] = { ...track, keys: track.keys.map(k => ({ ...k, v: Math.sign(k.v) * Math.min(Math.abs(k.v), capScale) })) };
+      }
+      transform.x = offsetTrack(transform.x, gx - valueAt(transform.x, ts, 0), 0);
+      transform.y = offsetTrack(transform.y, gy - valueAt(transform.y, ts, 0), 0);
+      const rest: [string, number][] = [['x', gx], ['y', gy], ['scaleX', st], ['scaleY', st], ['rotation', target.rotation], ['shearX', 0]];
+      for (const [name, value] of rest) transform[name] = settleTrack(transform[name] ?? value, ts, settle.lineEnd, value);
+      life = settle.lineEnd;
+    }
+    elements.push({ id: groupId, name: text ?? g0.name, type: 'group', inPoint, outPoint: life, transform });
     if (slot.role === 'shape') {
       for (const child of slot.children) {
         const cin = snap(Math.max(inPoint, g(sec(child.inPoint, p.fromSec)))), cout = snap(Math.min(outPoint, g(sec(child.outPoint, p.toSec))));
@@ -363,16 +444,18 @@ export function retarget(p: LoadedPassage, tokens: StageToken[], start: number, 
       continue;
     }
     // Text: fit to the source glyph (height, within 1.25x width), correct inherited squash, keep a readable floor.
-    const fit = fitWord(slot, text!);
+    const fit0 = fitWord(slot, text!);
+    // Settled words rest at a uniform scale, so the inherited squash correction is not applied to them.
+    const fit = target ? { ...fit0, squash: 1 } : fit0;
     const ink = inkOf(text!, fit.font);
     const blockId = `${groupId}:block`;
-    elements.push({ id: blockId, name: '動きのブロック', type: 'rect', parentId: groupId, inPoint, outPoint, fill,
+    elements.push({ id: blockId, name: '動きのブロック', type: 'rect', parentId: groupId, inPoint, outPoint: life, fill,
       width: ink.w * fit.squash, height: ink.h, transform: { x: slot.localX, y: slot.localY } });
     sourceWidth.set(`${groupId}:text`, slot.localW);
-    const entrance = characterEntrance(text!, fit.font, inPoint, outPoint, o.fps, rng);
+    const entrance = o.mode === 'composed' ? characterEntrance(text!, fit.font, inPoint, life, o.fps, rng) : { style: 'reference', fields: {} };
     entrances.push({ text: text!, style: entrance.style });
     bindings.push({ blockId, groupId, text: { id: `${groupId}:text`, name: text, type: 'text', text, parentId: groupId,
-      fontFamily: FAMILY, fontWeight: 700, fontSize: fit.font, fill, inPoint, outPoint, ...entrance.fields,
+      fontFamily: FAMILY, fontWeight: 700, fontSize: fit.font, fill, inPoint, outPoint: life, ...entrance.fields,
       transform: { x: slot.localX - ink.dx * fit.squash, y: slot.localY - ink.dy, ...(fit.squash !== 1 ? { scaleX: fit.squash } : {}) } } });
   }
   const darkRanges = (p.spec.dark ?? []).map(([a, b]) => [snap(Math.max(start, g(a / p.fps))), snap(Math.min(end, g((b + 1) / p.fps)))])
@@ -427,9 +510,17 @@ function cameraRig(id: string, chunks: ChunkPlan[], from: number, to: number, in
   return { elements, moves };
 }
 
+const scriptOf = (c: string) => /\p{Script=Han}/u.test(c) ? 'han' : /\p{Script=Katakana}|ー/u.test(c) ? 'kata' : /\p{Script=Hiragana}/u.test(c) ? 'hira' : 'other';
+function scriptCut(chars: string[]) {
+  let best = -1;
+  for (let i = 2; i <= chars.length - 2; i++) if (scriptOf(chars[i]) !== scriptOf(chars[i - 1]))
+    if (best < 0 || Math.abs(i - chars.length / 2) < Math.abs(best - chars.length / 2)) best = i;
+  return best;
+}
+
 /** Finer chopping (feedback): long words split into two timed parts; single kanji with known parts expand
  * into part, part, kanji for the merge passages. */
-export function prepareLines(lines: StageLine[], fps: number) {
+export function prepareLines(lines: StageLine[], fps: number, split = true) {
   let compound = 0;
   const minGap = 2 / fps;
   return lines.map(line => {
@@ -444,8 +535,9 @@ export function prepareLines(lines: StageLine[], fps: number) {
         tokens.push({ text: parts[0], at: token.at, emphasis: false, compound: id },
           { text: parts[1], at: Math.round((token.at + span * .3) * fps) / fps, emphasis: false, compound: id },
           { text: token.text, at: Math.round((token.at + span * .6) * fps) / fps, emphasis: true, compound: id });
-      } else if (chars.length >= 4 && span >= 4 * minGap) {
-        const cut = Math.ceil(chars.length / 2);
+      } else if (split && chars.length >= 4 && span >= 4 * minGap && scriptCut(chars) > 0) {
+        // Split where the script changes (kanji / hiragana / katakana), nearest the middle.
+        const cut = scriptCut(chars);
         tokens.push({ text: chars.slice(0, cut).join(''), at: token.at, emphasis: token.emphasis },
           { text: chars.slice(cut).join(''), at: Math.round((token.at + span * .45) * fps) / fps, emphasis: false });
       } else tokens.push(token);
@@ -457,31 +549,72 @@ export function prepareLines(lines: StageLine[], fps: number) {
 /** Stage all lines with passages. Returns the block scene, appearance bindings and the selection record. */
 export function stageWithPassages(input: StageLine[], o: Options) {
   const passages = PASSAGES.map(loadPassage);
-  const lines = prepareLines(input, o.fps);
+  const lines = prepareLines(input, o.fps, o.mode === 'composed');
   const snap = snapper(o.fps);
   const scene: Scene = { ...emptyScene(), width: o.width, height: o.height, fps: o.fps, duration: o.duration,
     background: PAPER, elements: [], markers: [] };
   const appearance: AppearanceBinding[] = [];
   const sourceWidth = new Map<string, number>();
   const usage = new Map<string, number>();
-  const records: { line: number; intensity: number; tokens: string[]; chunks: ChunkPlan[]; camera: string[] }[] = [];
+  const records: { line: number; intensity: number; inverted: boolean; tokens: string[]; chunks: ChunkPlan[]; camera: string[];
+    lockup: { kind: string; score: number; metrics: Record<string, number>; words: string[] } }[] = [];
   const entranceLog: { line: number; text: string; style: string }[] = [];
   const rng = o.rng ?? seeded(1 + (o.variation ?? 0));
   let previous: string | undefined;
+  let previousLockup: string | undefined;
   for (const [i, line] of lines.entries()) {
     const intensity = o.intensity?.[i] ?? .5;
-    const chunks = planLine(line, passages, previous, usage, intensity, rng);
+    const faithful = o.mode !== 'composed';
+    const chunks = planLine(line, passages, previous, usage, intensity, rng, faithful, o.fps);
+    if (faithful) {
+      // Faithful scene transfer (docs/49): each chunk is a whole reference scene, re-timed; its own
+      // positions, entrances, exits, shapes and background inversions stay as the author made them.
+      let cursor = 0;
+      for (const [c, chunk] of chunks.entries()) {
+        const p = passages.find(x => x.spec.id === chunk.passage)!;
+        const tokens = chunk.units ?? line.tokens.slice(cursor, cursor + chunk.tokens.length);
+        cursor += chunk.tokens.length;
+        const built = retarget(p, tokens, chunk.start, chunk.end, `stage:${i}:${c}`, { ...o, rng });
+        scene.elements.push({ id: `stage:${i}:${c}:bg`, type: 'rect', zIndex: -1000, width: o.width, height: o.height, fill: PAPER,
+          inPoint: snap(chunk.start), outPoint: snap(chunk.end), transform: { x: o.width / 2, y: o.height / 2 } });
+        for (const [d, [a, b]] of built.darkRanges.entries()) scene.elements.push({ id: `stage:${i}:${c}:dark:${d}`, type: 'rect', zIndex: -999,
+          width: o.width, height: o.height, fill: INK, inPoint: a, outPoint: b, transform: { x: o.width / 2, y: o.height / 2 } });
+        scene.elements.push(...built.elements);
+        appearance.push(...built.bindings);
+        for (const [k, v] of built.sourceWidth) sourceWidth.set(k, v);
+        usage.set(p.spec.id, (usage.get(p.spec.id) ?? 0) + 1);
+        previous = p.spec.id;
+      }
+      for (const token of input[i].tokens) scene.markers!.push({ t: token.at, kind: 'note', label: token.text, origin: 'estimated' });
+      records.push({ line: i + 1, intensity, inverted: false, tokens: line.tokens.map(t => t.text), chunks, camera: [],
+        lockup: { kind: 'reference', score: 0, metrics: {}, words: [] } });
+      continue;
+    }
+    // One polarity per line, so words that stay until the line ends never meet a background of their own colour.
+    const inverted = intensity >= .8;
+    const fg = inverted ? PAPER : INK;
+    scene.elements.push({ id: `stage:${i}:bg`, type: 'rect', zIndex: -1000, width: o.width, height: o.height, fill: inverted ? INK : PAPER,
+      inPoint: snap(line.from), outPoint: snap(line.to), transform: { x: o.width / 2, y: o.height / 2 } });
+    // Design the line's final composition first (docs/48), then back-solve each word's motion into it.
+    const slotPlan: { c: number; slotIndex: number; text: string; emphasis: boolean }[] = [];
+    let walk = 0;
+    for (const [c, chunk] of chunks.entries()) {
+      const p = passages.find(x => x.spec.id === chunk.passage)!;
+      const tokens = line.tokens.slice(walk, walk + chunk.tokens.length); walk += tokens.length;
+      for (const st of slotTexts(p, tokens)) if (!st.part) slotPlan.push({ c, slotIndex: st.slotIndex, text: st.text, emphasis: st.emphasis });
+    }
+    const lockup = designLockup(slotPlan.map(sp => { const ink = inkOf(sp.text, 100); return { text: sp.text, emphasis: sp.emphasis, aspect: ink.w / Math.max(1, ink.h) }; }),
+      o.width, o.height, rng, previousLockup);
+    previousLockup = lockup.kind;
     let cursor = 0;
     for (const [c, chunk] of chunks.entries()) {
       const p = passages.find(x => x.spec.id === chunk.passage)!;
       const tokens = line.tokens.slice(cursor, cursor + chunk.tokens.length);
       cursor += tokens.length;
-      const built = retarget(p, tokens, chunk.start, chunk.end, `stage:${i}:${c}`, { ...o, rng });
+      const targets = new Map<number, LockupItem>();
+      slotPlan.forEach((sp, k) => { if (sp.c === c && lockup.items[k]) targets.set(sp.slotIndex, lockup.items[k]); });
+      const built = retarget(p, tokens, chunk.start, chunk.end, `stage:${i}:${c}`, { ...o, rng }, { targets, lineEnd: snap(line.to), fill: fg });
       for (const element of built.elements) if (element.type === 'group' && !element.parentId) element.parentId = `stage:${i}:camoff`;
-      scene.elements.push({ id: `stage:${i}:${c}:bg`, type: 'rect', zIndex: -1000, width: o.width, height: o.height, fill: PAPER,
-        inPoint: snap(chunk.start), outPoint: snap(chunk.end), transform: { x: o.width / 2, y: o.height / 2 } });
-      for (const [d, [a, b]] of built.darkRanges.entries()) scene.elements.push({ id: `stage:${i}:${c}:dark:${d}`, type: 'rect', zIndex: -999,
-        width: o.width, height: o.height, fill: INK, inPoint: a, outPoint: b, transform: { x: o.width / 2, y: o.height / 2 } });
       scene.elements.push(...built.elements);
       appearance.push(...built.bindings);
       for (const [k, v] of built.sourceWidth) sourceWidth.set(k, v);
@@ -489,10 +622,12 @@ export function stageWithPassages(input: StageLine[], o: Options) {
       usage.set(p.spec.id, (usage.get(p.spec.id) ?? 0) + 1);
       previous = p.spec.id;
     }
-    const camera = cameraRig(`stage:${i}`, chunks, snap(line.from), snap(line.to), intensity, o, rng);
+    // One camera move per line (calmer than one per chunk).
+    const camera = cameraRig(`stage:${i}`, intensity >= .6 ? chunks : [{ ...chunks[0], start: line.from, end: line.to }], snap(line.from), snap(line.to), intensity, o, rng);
     scene.elements.push(...camera.elements);
     for (const token of input[i].tokens) scene.markers!.push({ t: token.at, kind: 'note', label: token.text, origin: 'estimated' });
-    records.push({ line: i + 1, intensity, tokens: line.tokens.map(t => t.text), chunks, camera: camera.moves });
+    records.push({ line: i + 1, intensity, inverted, tokens: line.tokens.map(t => t.text), chunks, camera: camera.moves,
+      lockup: { kind: lockup.kind, score: lockup.score, metrics: lockup.metrics, words: slotPlan.map(sp => sp.text) } });
   }
   return { blockScene: scene, appearance, records, sourceWidth, entrances: entranceLog };
 }
