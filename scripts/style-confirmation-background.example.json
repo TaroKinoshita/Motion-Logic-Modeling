@@ -1,0 +1,8 @@
+{
+  "works": {},
+  "rowExample": {
+    "sha256": "sha256 from the prepared work",
+    "approvedBackgroundRanges": [[12.6, 13.72], [14.2, 16.9]],
+    "note": "元コマで無地背景を確認した区間。開始を含み、終了を含まない秒数。"
+  }
+}

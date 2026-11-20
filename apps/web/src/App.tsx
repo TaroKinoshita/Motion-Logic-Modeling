@@ -6,6 +6,7 @@ import { BlockJobStatus, BlockingTools, busyJob } from './BlockingTools.tsx';
 import { api, ApiError } from './api.ts';
 import type { BlockJob, ExportResult, ProjectData } from './api.ts';
 import { Inspector } from './Inspector.tsx';
+import {LyricPlanner} from './LyricPlanner.tsx';
 import { Stage } from './Stage.tsx';
 import type { ViewMode } from './Stage.tsx';
 import { Timeline } from './Timeline.tsx';
@@ -441,6 +442,7 @@ export function App() {
               videoUrl={source ? `/api/projects/${data.project.id}/media/source?v=${source.sha256.slice(0, 8)}` : null}
               selectedId={selectedId}
             />}
+            {source?.hasAudio&&<LyricPlanner id={data.project.id} revision={data.project.revision} duration={shown.duration} onError={fail}/>}
             {!activeBlocking && <Inspector
               data={data}
               history={history}

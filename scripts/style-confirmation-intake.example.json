@@ -1,0 +1,16 @@
+{
+  "works": [],
+  "rowExample": {
+    "workId": "confirmed-original-work-id",
+    "title": "原作品のタイトル",
+    "sourcePath": "C:/path/to/full-video.mp4",
+    "credit": "映像担当者",
+    "creditEvidence": "確認できるクレジットの所在・クレジット表記",
+    "songId": "same-song-id-for-related-works",
+    "seriesId": "",
+    "language": "ja",
+    "genre": "kinetic lyric typography",
+    "matchId": "pair-01",
+    "role": "reference"
+  }
+}

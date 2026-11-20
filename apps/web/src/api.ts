@@ -88,6 +88,9 @@ export const api = {
     post<ProjectData>(`/api/projects/${id}/${operation}`,body),
   generateBaselines: (id:string,body:unknown)=>post<{projects:ProjectData[]}>(`/api/projects/${id}/adapt-baselines`,body),
   saveStyleStudy: (id:string,body:unknown)=>post<ProjectData>(`/api/projects/${id}/style-study`,body),
+  dressLyrics: (id:string,body:unknown)=>post<ProjectData>(`/api/projects/${id}/lyric-appearance`,body),
+  planLyrics: (id:string,body:unknown)=>post<ProjectData & {blocking:ProjectData;decisions:{line:number;selected:string;motion:string;carryReason:string;readingWarnings:string[]}[];
+    audit:{checkedFrames:number;overlaps:number;outside:number}}>(`/api/projects/${id}/lyric-plan`,body),
   passages: (id:string)=>request<{revision:number;candidates:PassageCandidate[];reviews:PassageReview[]}>(`/api/projects/${id}/passages`),
   editPassage: (id:string,body:unknown)=>post<ProjectData>(`/api/projects/${id}/passages`,body),
   generateRulePair: (id:string,body:unknown)=>post<{variants:{label:string;project:ProjectMeta}[];reveal:{withRule:string;withoutRule:string}}>(`/api/projects/${id}/variant-pair`,body),

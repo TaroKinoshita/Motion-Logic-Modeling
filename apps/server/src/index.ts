@@ -10,6 +10,7 @@ import { applyOrientation, editTiming, TimingRequest } from './timing.ts';
 import { saveStyleStudy, StyleStudyRequest } from './style-study.ts';
 import { editPassage, getPassages, PassageRequest } from './passage-study.ts';
 import { generateLyricStudy, LyricGenerationRequest } from './lyric-generation.ts';
+import {generatePlannedLyrics,LyricPlanRequest,generateLyricAppearance,DressLyricsRequest} from './lyric-planner.ts';
 import { MotionVocabularyRequest, saveMotionVocabulary } from './motion-vocabulary.ts';
 // Motion Logic サーバー。UI（ブラウザ）とMCPアダプターの両方がこのHTTP APIを使う。
 // ローカル利用が前提なので 127.0.0.1 にだけ待ち受ける。
@@ -111,6 +112,8 @@ app.get('/api/projects/:id/passages',c=>{
 });
 app.post('/api/projects/:id/passages',async c=>c.json(editPassage(c.req.param('id'),parse(PassageRequest,await c.req.json()))));
 app.post('/api/projects/:id/lyric-study', async c => c.json(generateLyricStudy(c.req.param('id'), parse(LyricGenerationRequest, await c.req.json()))));
+app.post('/api/projects/:id/lyric-plan',async c=>c.json(generatePlannedLyrics(c.req.param('id'),parse(LyricPlanRequest,await c.req.json())),201));
+app.post('/api/projects/:id/lyric-appearance',async c=>c.json(generateLyricAppearance(c.req.param('id'),parse(DressLyricsRequest,await c.req.json())),201));
 app.post('/api/projects/:id/motion-vocabulary', async c => c.json(await saveMotionVocabulary(c.req.param('id'), parse(MotionVocabularyRequest, await c.req.json()))));
 app.post('/api/projects/:id/variant', async c => c.json(generateVariant(c.req.param('id'), parse(VariantRequest, await c.req.json()))));
 app.post('/api/projects/:id/variant-pair', async c => c.json(generateRulePair(c.req.param('id'), parse(VariantRequest, await c.req.json()))));

@@ -1,0 +1,17 @@
+{
+  "works": {},
+  "rowExample": {
+    "sha256": "sha256 from the prepared work",
+    "frames": [
+      {
+        "frame": 42,
+        "status": "reviewed",
+        "blocks": [
+          {"role": "lyric", "text": "青", "box": [0.15, 0.32, 0.18, 0.35]},
+          {"role": "lyric", "text": "空", "box": [0.43, 0.42, 0.08, 0.14]},
+          {"role": "frame", "box": [0.05, 0.07, 0.90, 0.84]}
+        ]
+      }
+    ]
+  }
+}

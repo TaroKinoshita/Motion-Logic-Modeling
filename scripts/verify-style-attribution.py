@@ -97,7 +97,40 @@ def summarize_curves(pairs, screen_rows, mode, durations):
                 motionStarts=float(starts/transitions) if transitions else None,sizeContrastP90=quantile(height),
                 validAdjacentFlowPairs=transitions,validAccelerations=len(present),validJerks=len(jerk))
 
-def scan(source):
+def stable_bands(frames):
+    margins = [[],[]]
+    for frame in frames:
+        for side, edge in enumerate((frame,frame[::-1])):
+            edge = edge[:H//5].astype(np.int16)
+            color = np.median(edge[:4],axis=(0,1))
+            matches = (np.max(np.abs(edge-color),axis=2)<=12).mean(axis=1) >= .96
+            failures = np.flatnonzero(~matches)
+            height = int(failures[0]) if len(failures) else 0
+            if 5<=height<=H//6:
+                inside = edge[height+2:height+6]
+                different = (np.max(np.abs(inside-color),axis=2)>=22).mean()
+                if different>=.78:
+                    margins[side].append(height)
+    return [int(round(np.median(values))) if len(values)>=.8*len(frames) and np.ptp(values)<=4 else 0
+            for values in margins]
+
+
+def plain_perimeter(frame):
+    colors = []
+    cells = [(y,x) for y in range(6) for x in range(10) if y in (0,5) or x in (0,9)]
+    for y,x in cells:
+        tile = frame[y*H//6:(y+1)*H//6,x*W//10:(x+1)*W//10][::3,::3].astype(np.int16)
+        median = np.median(tile,axis=(0,1))
+        if (np.max(np.abs(tile-median),axis=2)<=8).mean()>=.90:
+            colors.append(median)
+    if not colors:
+        return False
+    colors = np.array(colors)
+    matches = (np.abs(colors[:,None]-colors).max(axis=2)<=15).sum(axis=1)
+    return bool(matches.max()>=np.ceil(len(cells)*2/3))
+
+
+def scan(source, controlled=False):
     filename = Path(source['path'])
     sha = hashlib.sha256(filename.read_bytes()).hexdigest()
     if 'sha256' in source and sha != source['sha256']:
@@ -111,30 +144,51 @@ def scan(source):
     if duration < SECONDS:
         cap.release()
         raise ValueError(f'Expected a duration of at least {SECONDS} s: {filename}')
-    starts = {name: offset*(duration-SECONDS) for name, offset in [('early',0),('center',.5),('late',1)]}
+    starts = {name: offset*(duration-SECONDS) for name, offset in
+              [('early',.25 if controlled else 0),('center',.5),('late',.75 if controlled else 1)]}
+    planned = source.get('plannedStarts')
+    if planned is not None:
+        if len(planned)!=3 or any(start<0 or start>duration-SECONDS+.5/fps for start in planned):
+            cap.release()
+            raise ValueError(f'Invalid planned five-second windows: {filename}')
+        starts = dict(zip(starts,planned))
     indices = {name: [round((start+i/RATE)*fps) for i in range(RATE*SECONDS)] for name,start in starts.items()}
     wanted = set(index for part in indices.values() for index in part)
     buffers = {}
     try:
-        for i in range(max(wanted)+1):
-            if not cap.grab():
-                raise ValueError(f'Unexpected end at {filename}:{i}')
-            if i not in wanted:
-                continue
+        i = 0
+        for index in sorted(wanted):
+            if index-i>round(3*fps):
+                if not cap.set(cv2.CAP_PROP_POS_FRAMES,index):
+                    raise ValueError(f'Cannot seek {filename}:{index}')
+                i = index
+            for frame in range(i,index+1):
+                if not cap.grab():
+                    raise ValueError(f'Unexpected end at {filename}:{frame}')
             ok, frame = cap.retrieve()
             if not ok:
-                raise ValueError(f'Cannot decode {filename}:{i}')
-            buffers[i] = cv2.resize(frame,(W,H),interpolation=cv2.INTER_AREA)
+                raise ValueError(f'Cannot decode {filename}:{index}')
+            buffers[index] = cv2.resize(frame,(W,H),interpolation=cv2.INTER_AREA)
+            i = index+1
     finally:
         cap.release()
+    top, bottom = stable_bands(list(buffers.values())[::4]) if controlled else (0,0)
+    if top or bottom:
+        buffers = {index:cv2.resize(frame[top:H-bottom],(W,H),interpolation=cv2.INTER_AREA) for index,frame in buffers.items()}
     # Cache each cropped frame and consecutive pair irrespective of window overlap.
     screen = {}
     transitions = {}
+    approved_background = source.get('approvedBackgroundRanges')
     for i in wanted:
         frame = buffers[i]
         gray = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
         hsv = cv2.cvtColor(frame,cv2.COLOR_BGR2HSV)
+        if approved_background is None:
+            plain = not controlled or plain_perimeter(frame)
+        else:
+            plain = any(start <= i/fps < end for start,end in approved_background)
         screen[i] = dict(gray=gray, raw=frame, masks={mode:features(frame,mode) for mode in ('row','edge')},
+                         plain=plain,
                          appearance=[np.median(hsv[:,:,1])/255,(hsv[:,:,1]>75).mean(),np.median(gray)/255,(gray<75).mean()])
     for left,right in sorted({pair for part in indices.values() for pair in zip(part,part[1:])}):
         a,b = screen[left],screen[right]
@@ -143,6 +197,9 @@ def scan(source):
         cut = float((difference>45).mean())>.48 or float(difference.mean())>46
         if cut:
             transitions[left,right] = (True,{})
+            continue
+        if not a['plain'] or not b['plain']:
+            transitions[left,right] = (False,{})
             continue
         flow = cv2.calcOpticalFlowFarneback(a['gray'],b['gray'],None,.5,3,21,3,5,1.2,0)
         speed = np.hypot(flow[:,:,0],flow[:,:,1])*fps/((right-left)*np.hypot(W,H))
@@ -158,7 +215,7 @@ def scan(source):
         appearance = dict(zip(GROUPS['appearance'],np.median([screen[i]['appearance'] for i in part],axis=0).tolist()))
         modes = {}
         for mode in ('row','edge'):
-            rows = [screen[i]['masks'][mode][1] for i in part]
+            rows = [screen[i]['masks'][mode][1] if screen[i]['plain'] else [np.nan]*5 for i in part]
             motion = [measured[mode] for _,measured in pairs if mode in measured]
             modes[mode] = {**average_rows(rows),**summarize_motion(motion,len(pairs)),
                            **summarize_curves(pairs,rows,mode,[(b-a)/fps for a,b in zip(part,part[1:])]),
@@ -166,9 +223,14 @@ def scan(source):
         windows[name] = dict(fromSeconds=part[0]/fps,toLastSampleSeconds=part[-1]/fps,
                              sampledFrames=len(part),sourceFrames=part,cutPairs=sum(cut for cut,_ in pairs),
                              appearance=appearance,**modes)
-    return dict(id=filename.stem,sourceSha256=sha,path=str(filename),group=source['group'],
+    return dict(id=source.get('workId',filename.stem),sourceSha256=sha,path=str(filename),group=source['group'],
                 credit=source['credit'],originalWorkId=None,sourceFps=fps,sourceFrames=n,
-                durationSeconds=duration,windows=windows)
+                durationSeconds=duration,windows=windows,**(
+                    dict(edgeBands=[top,bottom],distinctFrames=len(wanted),
+                        distinctPlainFrames=sum(item['plain'] for item in screen.values()),
+                        dominantPairFrames=sum(bool(item['plain'] and item['masks']['row'][1][1]>=2) for item in screen.values()),
+                        highContrastPairFrames=sum(bool(item['plain'] and item['masks']['row'][1][1]>=2 and item['masks']['row'][1][2]>=2)
+                                                    for item in screen.values())) if controlled else {}))
 
 
 def balanced(labels,predictions):
