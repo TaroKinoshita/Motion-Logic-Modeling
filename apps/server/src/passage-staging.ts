@@ -7,7 +7,7 @@
 //  - a line camera with rotation and depth push/pull, strong eases instead of linear,
 //  - seeded variety, song structure (show vs bridge passages), kanji part-merge staging.
 import { createCanvas } from '@napi-rs/canvas';
-import { canvasMeasurer, emptyScene, evaluateScene, fontSpec, type Scene, type SceneElement, type Track } from '@mlm/core';
+import { canvasMeasurer, emptyScene, evaluateScene, fontSpec, sampleTrack, type Scene, type SceneElement, type Track } from '@mlm/core';
 import { getProject, HttpError } from './store.ts';
 import { PASSAGES, type PassageSpec } from './passage-library.ts';
 import { partsOf } from './kanji-parts.ts';
@@ -37,6 +37,8 @@ const EXPO_OUT: Ease = { cubic: [.05, .9, .1, 1] };
 const BACK_OUT: Ease = { cubic: [.15, .9, .25, 1.35] };
 /** Median on-screen height floor for a word (fraction of frame height). */
 const READABLE = .08;
+/** Shortest time for a part-merge (parts readable, then result readable). Design value to be compared. */
+const MERGE_MIN = .4;
 
 const ctx = createCanvas(1, 1).getContext('2d');
 const measure = canvasMeasurer(ctx);
@@ -69,9 +71,12 @@ const median = (values: number[], fallback: number) => {
 
 interface LoadedSlot { index: number; group: SceneElement; children: SceneElement[]; role: 'text' | 'shape';
   order: number; alias?: number; inSec: number; maxH: number; medianH: number; aspect: number;
+  /** The source child's own horizontal/vertical scale ratio (it may cancel the parent's stretch). */
+  childAspect: number;
   localW: number; localH: number; localX: number; localY: number }
 export interface LoadedPassage { spec: PassageSpec; fps: number; width: number; height: number; fromSec: number; toSec: number;
-  slots: LoadedSlot[]; textSlots: LoadedSlot[]; largestText: number }
+  slots: LoadedSlot[]; textSlots: LoadedSlot[]; largestText: number;
+  startPose?: { x: number; y: number; h: number }; endPose?: { x: number; y: number; h: number }; darkStart: boolean; darkEnd: boolean }
 
 const cache = new Map<string, LoadedPassage>();
 
@@ -83,6 +88,8 @@ export function loadPassage(spec: PassageSpec): LoadedPassage {
   const byId = new Map(scene.elements.map(element => [element.id, element]));
   const fps = scene.fps;
   const heights = new Map<string, number[]>(), aspects = new Map<string, number[]>();
+  const textGroupIds = new Set(spec.slots.filter(s => s.role === 'text').map(s => s.group));
+  const poses: { frame: number; x: number; y: number; h: number }[] = [];
   for (let frame = spec.from; frame <= spec.to; frame++) {
     for (const ev of evaluateScene(scene, (frame + .5) / fps, measure)) {
       const parent = ev.element.parentId;
@@ -90,6 +97,7 @@ export function loadPassage(spec: PassageSpec): LoadedPassage {
       const [a, b, c, d] = ev.matrix;
       const h = (ev.element.type === 'text' ? inkOf(ev.element.text ?? '', ev.element.fontSize ?? 100).h : ev.element.height ?? 0) * Math.hypot(c, d);
       heights.set(parent, [...(heights.get(parent) ?? []), h / scene.height]);
+      if (textGroupIds.has(parent)) poses.push({ frame, x: ev.matrix[4] / scene.width, y: ev.matrix[5] / scene.height, h: h / scene.height });
       if (Math.hypot(c, d) > 1e-6) aspects.set(parent, [...(aspects.get(parent) ?? []), Math.hypot(a, b) / Math.hypot(c, d)]);
     }
   }
@@ -103,20 +111,25 @@ export function loadPassage(spec: PassageSpec): LoadedPassage {
       const x = typeof t.x === 'number' ? t.x : 0, y = typeof t.y === 'number' ? t.y : 0;
       if (child.type === 'text') {
         const ink = inkOf(child.text ?? '', child.fontSize ?? 100);
-        return { w: ink.w * sx, h: ink.h * sy, x: x + ink.dx * sx, y: y + ink.dy * sy };
+        return { w: ink.w * sx, h: ink.h * sy, x: x + ink.dx * sx, y: y + ink.dy * sy, ratio: Math.abs(sx / (sy || 1)) };
       }
-      return { w: (child.width ?? 0) * sx, h: (child.height ?? 0) * sy, x, y };
+      return { w: (child.width ?? 0) * sx, h: (child.height ?? 0) * sy, x, y, ratio: Math.abs(sx / (sy || 1)) };
     }).filter(box => box.h > 0).sort((a, b) => b.h - a.h);
-    const box = sized[0] ?? { w: 100, h: 100, x: 0, y: 0 };
+    const box = sized[0] ?? { w: 100, h: 100, x: 0, y: 0, ratio: 1 };
     const hs = heights.get(group.id) ?? [];
     return { index, group, children, role: slot.role, order: slot.order ?? index, alias: slot.alias,
       inSec: sec(group.inPoint, spec.from / fps), maxH: hs.length ? Math.max(...hs) : 0, medianH: median(hs, 0),
-      aspect: median(aspects.get(group.id) ?? [], 1), localW: box.w, localH: box.h, localX: box.x, localY: box.y };
+      aspect: median(aspects.get(group.id) ?? [], 1), childAspect: box.ratio, localW: box.w, localH: box.h, localX: box.x, localY: box.y };
   });
   const textSlots = slots.filter(slot => slot.role === 'text' && slot.alias === undefined).sort((a, b) => a.order - b.order);
   const largestText = textSlots.reduce((best, slot, i) => slot.maxH > textSlots[best].maxH ? i : best, 0);
+  // Largest text glyph on the first and last frame with text: where the eye is when the scene starts / ends.
+  const mainAt = (frame: number) => poses.filter(q => q.frame === frame).sort((a, b) => b.h - a.h)[0];
+  const frames = poses.map(q => q.frame);
+  const startPose = frames.length ? mainAt(Math.min(...frames)) : undefined, endPose = frames.length ? mainAt(Math.max(...frames)) : undefined;
+  const darkAt = (frame: number) => (spec.dark ?? []).some(([a, b]) => frame >= a && frame <= b);
   const loaded = { spec, fps, width: scene.width, height: scene.height, fromSec: spec.from / fps, toSec: (spec.to + 1) / fps,
-    slots, textSlots, largestText };
+    slots, textSlots, largestText, startPose, endPose, darkStart: darkAt(spec.from), darkEnd: darkAt(spec.to) };
   cache.set(spec.id, loaded);
   return loaded;
 }
@@ -136,8 +149,10 @@ function timeMap(anchors: [number, number][]) {
 }
 
 /** Fit of a word to a slot: shrink ratio, aspect correction and resulting median on-screen height. */
-function fitWord(slot: LoadedSlot, text: string) {
-  const squash = Math.min(1.1, Math.max(.9, slot.aspect)) / slot.aspect;
+function fitWord(slot: LoadedSlot, text: string, faithful = true) {
+  // Faithful: reproduce the source child's own scale ratio (docs/50 step 2: the bar text's child narrows to
+  // cancel the parent's horizontal stretch). Composed: correct the observed squash to 0.9-1.1.
+  const squash = faithful ? slot.childAspect : Math.min(1.1, Math.max(.9, slot.aspect)) / slot.aspect;
   const base = inkOf(text, 100);
   const heightFit = slot.localH / Math.max(1, base.h);
   // Phrase slots keep the source's character size and may grow sideways up to 90% of the frame width;
@@ -154,6 +169,11 @@ function fitWord(slot: LoadedSlot, text: string) {
 
 const SHOW_TAGS = new Set(['big', 'big-result', 'invert', 'merge', 'collective-shrink', 'small-then-big', 'tilt']);
 const BRIDGE_TAGS = new Set(['phrase', 'bar', 'arrow', 'spread', 'row', 'frame', 'append']);
+
+/** Inverse of timeMap: target seconds back to source seconds. */
+function inverseMap(anchors: [number, number][]) {
+  return timeMap(anchors.map(([a, b]) => [b, a] as [number, number]).sort((x, y) => x[0] - y[0]));
+}
 
 export interface ChunkPlan { passage: string; work: string; tokens: string[]; units?: StageToken[]; start: number; end: number;
   stretch: number; score: number; reasons: string[]; alternatives: { passage: string; score: number }[] }
@@ -172,6 +192,8 @@ function scoreChunk(p: LoadedPassage, tokens: StageToken[], start: number, end: 
     const fit = fitWord(slot, text);
     if (fit.ratio > 1.25) score -= (m > 1 ? 1.2 : .6) * Math.log(fit.ratio / 1.25);
     if (fit.shown < .07) score -= 1.5;
+    // Prefer scenes where the new words end up large on screen (references: median main block 0.24 of height).
+    score += 4 * Math.min(fit.shown, .35) / Math.max(1, Math.min(k, m));
     // A phrase slot should not carry far more characters than the source phrase had.
     const sourceChars = Math.max(1, Math.round(slot.localW / Math.max(1, slot.localH)));
     const newChars = Array.from(text).length;
@@ -221,7 +243,12 @@ function planLine(line: StageLine, passages: LoadedPassage[], previous: string |
       const start = i - k === 0 ? line.from : tokens[0].at;
       const end = i === n ? line.to : line.tokens[i].at;
       const last = before.chunks.at(-1)?.passage ?? previous;
-      const scored = passages.map(p => {
+      // Lyric-side kinds (docs/50 step 3).
+      const compoundTriple = tokens.length === 3 && tokens[0].compound !== undefined && tokens.every(t => t.compound === tokens[0].compound);
+      const repeated = tokens.length === 2 && tokens[0].text === tokens[1].text;
+      const prevChunk = before.chunks.at(-1);
+      const prevPassage = prevChunk ? passages.find(x => x.spec.id === prevChunk.passage) : undefined;
+      const scored = passages.filter(p => faithful ? (p.spec.kind === 'merge') === compoundTriple : true).map(p => {
         // Faithful: glyph scenes receive characters, phrase scenes receive words.
         const units = faithful && glyphScene(p) ? explodeChars(tokens, end, fps) : tokens;
         const s = scoreChunk(p, units, start, end, intensity, faithful);
@@ -229,7 +256,16 @@ function planLine(line: StageLine, passages: LoadedPassage[], previous: string |
         const repeat = (p.spec.id === last ? 3 : 0) + 2.2 * used;
         // Faithful: one reference scene should carry as much of the line as possible (fewer seams).
         const span = faithful ? 1.6 * (tokens.length - 1) : 0;
-        return { p, units, score: s.score - repeat + span, stretch: s.stretch, reasons: s.reasons };
+        // Repeated word: scenes that keep or replace the first appearance carry the repetition.
+        const repeatFit = repeated && (p.spec.kind === 'append' || p.spec.kind === 'swap') ? 2 : 0;
+        // Seams inside a line (docs/50 step 5): keep the eye's place; do not flip polarity mid-line.
+        let seam = 0;
+        if (faithful && prevPassage?.endPose && p.startPose) {
+          const a = prevPassage.endPose, b = p.startPose;
+          seam -= 3 * Math.hypot((a.x - b.x) * 16 / 9, a.y - b.y) / Math.hypot(16 / 9, 1) + .8 * Math.abs(Math.log(Math.max(.01, b.h) / Math.max(.01, a.h)));
+          if (prevPassage.darkEnd !== p.darkStart) seam -= 1.5;
+        }
+        return { p, units, score: s.score - repeat + span + repeatFit + seam, stretch: s.stretch, reasons: s.reasons };
       }).sort((a, b) => b.score - a.score);
       // Variety: pick at random among candidates within 0.8 of the best score.
       const near = scored.filter(c => c.score >= scored[0].score - .8);
@@ -245,21 +281,8 @@ function planLine(line: StageLine, passages: LoadedPassage[], previous: string |
   return best[n]!.chunks;
 }
 
-/** Value of a track at time t (hold and linear; cubic eases are approximated linearly for checks). */
-function valueAt(track: Track | undefined, t: number, fallback: number) {
-  if (track === undefined) return fallback;
-  if (typeof track === 'number') return track;
-  const keys = track.keys.filter(k => typeof k.t === 'number') as Key[];
-  if (!keys.length) return fallback;
-  if (t <= keys[0].t) return keys[0].v;
-  for (let i = 1; i < keys.length; i++) {
-    if (t <= keys[i].t) {
-      const a = keys[i - 1], b = keys[i];
-      return a.ease === 'hold' ? a.v : a.v + (b.v - a.v) * (t - a.t) / (b.t - a.t);
-    }
-  }
-  return keys.at(-1)!.v;
-}
+/** Value of a track at time t, evaluated exactly as the shared renderer does (eases included). */
+const valueAt = (track: Track | undefined, t: number, fallback: number) => sampleTrack(track, t, fallback);
 
 const offsetTrack = (track: Track | undefined, add: number, fallback: number): Track =>
   track === undefined ? fallback + add : typeof track === 'number' ? track + add : { ...track, keys: track.keys.map(k => ({ ...k, v: k.v + add })) };
@@ -364,17 +387,37 @@ export function retarget(p: LoadedPassage, tokens: StageToken[], start: number, 
   anchors.push([p.toSec, end]);
   anchors.sort((a, b) => a[0] - b[0]);
   const g = timeMap(anchors);
+  const ginv = inverseMap(anchors);
   const sx = o.width / p.width, sy = o.height / p.height;
   const dark = (sourceSec: number) => (p.spec.dark ?? []).some(([a, b]) => sourceSec * p.fps >= a && sourceSec * p.fps <= b + .5);
   const mapTrack = (track: Track | undefined, scale = 1): Track | undefined => {
     if (track === undefined) return undefined;
     if (typeof track === 'number') return track * scale;
+    if (o.mode !== 'composed') {
+      // Faithful: sample the source at the source time of every output frame (exact under compression and
+      // stretching; one-frame jumps stay at frame resolution, no drift). docs/50 step 1.
+      const out: Key[] = [];
+      for (let f = Math.round(start * o.fps); f <= Math.round(end * o.fps); f++) {
+        const t = f / o.fps;
+        out.push({ t, v: sampleTrack(track, ginv(t), 0) * scale });
+      }
+      return out.length ? { keys: out } : undefined;
+    }
     const keys: Key[] = [];
-    for (const key of track.keys) {
-      if (typeof key.t !== 'number') continue;
-      const t = snap(Math.min(end, Math.max(start, g(key.t))));
-      const value: Key = { t, v: key.v * scale, ...(key.ease ? { ease: key.ease } : {}) };
-      if (keys.length && keys.at(-1)!.t === t) keys[keys.length - 1] = value; else keys.push(value);
+    const timed = track.keys.filter(k => typeof k.t === 'number') as Key[];
+    // Keys outside the passage window are replaced by the interpolated value at the window edge.
+    const inside = timed.filter(k => k.t >= p.fromSec - 1e-9 && k.t <= p.toSec + 1e-9);
+    if (timed.length && timed[0].t < p.fromSec - 1e-9 && !(inside[0] && Math.abs(inside[0].t - p.fromSec) < 1e-9))
+      inside.unshift({ t: p.fromSec, v: valueAt(track, p.fromSec, timed[0].v), ease: 'linear' });
+    if (timed.length && timed.at(-1)!.t > p.toSec + 1e-9 && !(inside.length && Math.abs(inside.at(-1)!.t - p.toSec) < 1e-9))
+      inside.push({ t: p.toSec, v: valueAt(track, p.toSec, timed.at(-1)!.v) });
+    for (const key of inside) {
+      let t = snap(Math.min(end, Math.max(start, g(key.t))));
+      // Compression can land several keys on one frame. Keep the earlier value and move the later key to the
+      // next frame (a one-frame jump), instead of overwriting it (docs/50).
+      if (keys.length && t <= keys.at(-1)!.t) t = snap(keys.at(-1)!.t + 1 / o.fps);
+      if (t > end + 1e-9) { keys[keys.length - 1] = { ...keys[keys.length - 1], v: key.v * scale }; continue; }
+      keys.push({ t, v: key.v * scale, ...(key.ease ? { ease: key.ease } : {}) });
     }
     // Sparse linear segments (gaps over 2 frames) get a strong ease; dense measured keys stay as they are.
     for (let i = 0; i < keys.length - 1; i++) {
@@ -408,7 +451,7 @@ export function retarget(p: LoadedPassage, tokens: StageToken[], start: number, 
     if (target && settle) {
       // Back-solve: keep the passage motion's shape but make it end exactly on the designed lockup pose,
       // then hold that pose until the line ends (docs/48).
-      const inkH = inkOf(text!, fitWord(slot, text!).font).h;
+      const inkH = inkOf(text!, fitWord(slot, text!, o.mode !== 'composed').font).h;
       const ts = Math.min(settle.lineEnd, Math.max(outPoint, snap(inPoint + 6 / o.fps)));
       const sxP = valueAt(transform.scaleX, ts, 1), syP = valueAt(transform.scaleY, ts, 1);
       const rotP = valueAt(transform.rotation, ts, 0), shearP = valueAt(transform.shearX, ts, 0);
@@ -420,7 +463,7 @@ export function retarget(p: LoadedPassage, tokens: StageToken[], start: number, 
       const gx = target.x - st * (Math.cos(th) * slot.localX - Math.sin(th) * slot.localY);
       const gy = target.y - st * (Math.sin(th) * slot.localX + Math.cos(th) * slot.localY);
       // Scaling the whole track to the rest size can blow up the entrance; cap it so the word stays near the frame.
-      const capScale = Math.max(st, o.width * 1.05 / Math.max(1, inkOf(text!, fitWord(slot, text!).font).w));
+      const capScale = Math.max(st, o.width * 1.05 / Math.max(1, inkOf(text!, fitWord(slot, text!, o.mode !== 'composed').font).w));
       for (const name of ['scaleX', 'scaleY'] as const) {
         const track = transform[name];
         if (track && typeof track !== 'number') transform[name] = { ...track, keys: track.keys.map(k => ({ ...k, v: Math.sign(k.v) * Math.min(Math.abs(k.v), capScale) })) };
@@ -444,7 +487,7 @@ export function retarget(p: LoadedPassage, tokens: StageToken[], start: number, 
       continue;
     }
     // Text: fit to the source glyph (height, within 1.25x width), correct inherited squash, keep a readable floor.
-    const fit0 = fitWord(slot, text!);
+    const fit0 = fitWord(slot, text!, o.mode !== 'composed');
     // Settled words rest at a uniform scale, so the inherited squash correction is not applied to them.
     const fit = target ? { ...fit0, squash: 1 } : fit0;
     const ink = inkOf(text!, fit.font);
@@ -530,11 +573,15 @@ export function prepareLines(lines: StageLine[], fps: number, split = true) {
       const span = next - token.at;
       const chars = Array.from(token.text);
       const parts = partsOf(token.text);
-      if (parts && span >= .3) {
+      // Merge only when the parts and the result can each be read (docs/50 step 4): at least 0.4 s, at most one
+      // merge per line (the candidate with the longest time wins), result held for the second half.
+      const best = line.tokens.map((t, j) => ({ j, span: (j + 1 < line.tokens.length ? line.tokens[j + 1].at : line.to) - t.at }))
+        .filter(c => partsOf(line.tokens[c.j].text) && c.span >= MERGE_MIN).sort((a, b) => b.span - a.span)[0];
+      if (parts && best?.j === k) {
         const id = compound++;
         tokens.push({ text: parts[0], at: token.at, emphasis: false, compound: id },
-          { text: parts[1], at: Math.round((token.at + span * .3) * fps) / fps, emphasis: false, compound: id },
-          { text: token.text, at: Math.round((token.at + span * .6) * fps) / fps, emphasis: true, compound: id });
+          { text: parts[1], at: Math.round((token.at + span * .25) * fps) / fps, emphasis: false, compound: id },
+          { text: token.text, at: Math.round((token.at + span * .5) * fps) / fps, emphasis: true, compound: id });
       } else if (split && chars.length >= 4 && span >= 4 * minGap && scriptCut(chars) > 0) {
         // Split where the script changes (kanji / hiragana / katakana), nearest the middle.
         const cut = scriptCut(chars);
